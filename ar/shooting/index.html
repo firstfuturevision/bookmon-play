@@ -1,0 +1,1539 @@
+<!doctype html><html><head><!--
+  ⚠ 수정 시 주의 — BookMon AR 페이지 (단독 페이지용)
+
+  • index.html 과 embed.html 은 같은 내용을 유지한다(한쪽만 고치면 실행 방식에 따라 동작이 갈린다).
+      - embed.html : 앱이 현재 페이지에 주입해 실행(통합 모드, 실제 서비스 경로) — src/features/map/arInject.ts
+      - index.html : /ar/shooting/ 단독 페이지로 실행(전체 페이지 이동 모드·단독 테스트용)
+    두 파일의 차이는 딱 두 가지뿐이어야 한다(예전엔 integrate 가 자동 변환, 지금은 손으로 맞춘다):
+      ① 에셋 경로: index.html = 상대경로 "assets/…"  /  embed.html = 절대경로 "/bookmon-play/ar/shooting/assets/…"
+         (주입되면 기준 URL 이 앱 페이지라 상대경로가 404 가 된다)
+      ② 종료 처리: embed.html 만 결과를 window.__bookmonEmbeddedDone(res) 로 앱에 넘긴다
+  • "/bookmon-play/ar/shooting/…" 경로는 GitHub Pages 배포 때 scripts/gh-pages-rewrite.mjs 가 basePath 를 붙인다
+    → 따옴표 안 리터럴로 둘 것(문자열을 이어 붙여 만들면 접두가 안 붙어 배포본에서 404).
+  • 여기서 싣는 스크립트나 UI 이미지를 추가·변경하면 src/features/map/arPrefetch.ts 의 목록도 맞출 것
+    (지도에서 미리 받아 두는 캐시. 안 맞으면 첫 AR 로딩이 다시 느려진다).
+  • 게임 로직은 bundle.js(빌드 산출물)에 있고, 이 파일의 JS 는 그 로직이 부르는 UI 훅(window.__bookmonUI 등)이다.
+    함수 이름/인자를 바꾸면 bundle.js 쪽 호출이 깨진다 — bundle.js 맨 앞 주석의 "계약" 참고.
+  • 직접 수정 이력: 저장소 루트 README "AR 모듈 — 빌드 산출물 직접 수정 이력".
+--><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>BookMon AR — Shooting</title><meta itemprop="name" content="BookMon AR — Shooting"><meta name="twitter:title" content="BookMon AR — Shooting"><meta property="og:title" content="BookMon AR — Shooting"><meta property="og:site_name" content="BookMon AR"><meta name="description" content="World-tracking AR shooting game: aim the crosshair at BookMon monsters and tap to hit."><meta itemprop="description" content="World-tracking AR shooting game: aim the crosshair at BookMon monsters and tap to hit."><meta property="og:description" content="World-tracking AR shooting game: aim the crosshair at BookMon monsters and tap to hit."><meta name="twitter:description" content="World-tracking AR shooting game: aim the crosshair at BookMon monsters and tap to hit."><link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin><link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Noto+Sans+KR:wght@400;500;700;900&display=swap"><script crossorigin="anonymous" src="./external/runtime/runtime.js"></script><script src="https://cdn.jsdelivr.net/npm/@8thwall/engine-binary@1/dist/xr.js" async crossorigin="anonymous" data-preload-chunks="slam"></script><script src="https://cdn.jsdelivr.net/npm/@8thwall/landing-page@1/dist/landing-page.js" crossorigin="anonymous"></script></head><body><style>#boot-overlay {
+    /* ⚠ 수정 시 주의: 검은색·z-index 55 — 앱의 지도→AR 페이드(useEncounterFlow, 검은색)와 이어지고,
+       다음 판 재시작 때 게임 UI(z 20: 조준점·안내)가 로딩 중에 비치지 않게 그 위(퀴즈 z 60 보다는 아래). */
+    position: fixed; inset: 0; z-index: 55;
+    background: #000000; opacity: 1;
+    transition: opacity 0.8s ease;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  }
+  #boot-overlay.fade-out { opacity: 0; pointer-events: none; }
+  /* Tiny loading label, bottom-left. Animated "..." dots show progress. */
+  #boot-overlay .loading {
+    position: absolute; left: 14px; bottom: calc(12px + env(safe-area-inset-bottom, 0px));
+    font-size: 11px; letter-spacing: 0.3px; color: #9aa0aa;
+  }
+  #boot-overlay .loading .dots::after {
+    content: ''; animation: loading-dots 1.2s steps(1,end) infinite;
+  }
+  @keyframes loading-dots {
+    0% { content: ''; } 25% { content: '.'; } 50% { content: '..'; } 75% { content: '...'; } 100% { content: ''; }
+  }
+  /* Desktop / unsupported guidance — centered, shown only on non-mobile. */
+  #boot-overlay .desktop-hint {
+    display: none; position: absolute; left: 50%; top: 50%;
+    transform: translate(-50%, -50%); width: 320px; max-width: 80%;
+    margin: 0; text-align: center; color: #c8ccd2; font-size: 14px; line-height: 1.6;
+  }
+
+  /* Shot muzzle flash: a quick, clearly-visible full-screen flash on each shot.
+     A bright center burst + warm edge glow reads as a gun muzzle flash. */
+  #shot-flash {
+    position: fixed; inset: 0; z-index: 40; pointer-events: none; opacity: 0;
+    background:
+      radial-gradient(circle at center, rgba(255,255,255,0.85) 0%, rgba(255,255,255,0.0) 42%),
+      radial-gradient(circle at center, rgba(255,180,60,0.0) 55%, rgba(255,150,30,0.55) 100%);
+  }
+  #shot-flash.fire { animation: shot-flash 200ms ease-out; }
+  @keyframes shot-flash { 0% { opacity: 1; } 60% { opacity: 0.7; } 100% { opacity: 0; } }
+
+  /* 캡처 효과 — 사진이 찍힐 때마다 받은 투명 영상 프레임을 background-image 로 바꿔 끼운다(playCaptureFlash). 바탕은 투명. */
+  #shutter-flash {
+    position: fixed; inset: 0; z-index: 43; pointer-events: none; opacity: 0;
+    background: transparent center / cover no-repeat;
+  }
+  #shutter-flash.snap { animation: shutter-snap 260ms ease-out; }
+  @keyframes shutter-snap { 0% { opacity: 0; } 30% { opacity: 0; } 42% { opacity: 0.95; } 100% { opacity: 0; } }
+
+  /* Mechanical shutter: black curtains snap CLOSED from top & bottom to meet at
+     center, then open — the viewfinder blackout of a real camera. The white flash
+     above fires as they open. Together they read clearly as "찰칵". */
+  #shutter-blades { position: fixed; inset: 0; z-index: 42; pointer-events: none; }
+  #shutter-blades .blade {
+    position: absolute; left: 0; right: 0; height: 51%; background: #000;
+  }
+  #shutter-blades .blade.top { top: 0; transform: translateY(-101%); }
+  #shutter-blades .blade.bot { bottom: 0; transform: translateY(101%); }
+  #shutter-blades.snap .blade.top { animation: blade-top 260ms cubic-bezier(0.5, 0, 0.5, 1); }
+  #shutter-blades.snap .blade.bot { animation: blade-bot 260ms cubic-bezier(0.5, 0, 0.5, 1); }
+  @keyframes blade-top {
+    0% { transform: translateY(-101%); } 40% { transform: translateY(0); }
+    52% { transform: translateY(0); } 100% { transform: translateY(-101%); }
+  }
+  @keyframes blade-bot {
+    0% { transform: translateY(101%); } 40% { transform: translateY(0); }
+    52% { transform: translateY(0); } 100% { transform: translateY(101%); }
+  }
+
+  /* ===== End-of-game result effect (replaces the success/fail text overlays) ===
+     Driven by __bookmonUI.showResult('success'|'fail'). Plays during the end
+     grace period before the page navigates back to the host. */
+  #result-fx { position: fixed; inset: 0; z-index: 50; pointer-events: none; opacity: 0; }
+  /* SUCCESS — the screen gradually fills with white. */
+  #result-fx.win { background: #ffffff; animation: result-win 1.8s ease-in forwards; }
+  @keyframes result-win { 0% { opacity: 0; } 100% { opacity: 1; } }
+  /* FAIL — a quick red flash, then the screen dims to a dark red vignette. */
+  #result-fx.lose {
+    background:
+      radial-gradient(circle at center, rgba(120, 0, 0, 0) 25%, rgba(15, 0, 0, 0.9) 100%),
+      rgba(60, 0, 0, 0.35);
+    animation: result-lose 1.4s ease-out forwards;
+  }
+  @keyframes result-lose {
+    0% { opacity: 0; }
+    10% { opacity: 1; }          /* quick red flash */
+    26% { opacity: 0.72; }       /* settle */
+    100% { opacity: 1; }         /* dark vignette holds */
+  }
+  /* After the fail vignette holds for a beat, a white layer fades IN on top,
+     covering the vignette so the run ends on a clean white screen (like success). */
+  #result-white {
+    position: fixed; inset: 0; z-index: 52; background: #ffffff;
+    opacity: 0; pointer-events: none; transition: opacity 1.5s ease;
+  }
+  #result-white.show { opacity: 1; }
+
+  /* Camera shake: applied to the AR canvas. The slight scale hides the edges
+     that the translation would otherwise reveal. */
+  canvas.cam-shake { animation: cam-shake 240ms ease-in-out; }
+  canvas.cam-shake-strong { animation: cam-shake-strong 300ms ease-in-out; }
+  @keyframes cam-shake {
+    0%, 100% { transform: translate(0, 0); }
+    20% { transform: translate(-7px, 5px) scale(1.05); }
+    45% { transform: translate(7px, -5px) scale(1.05); }
+    70% { transform: translate(-5px, -4px) scale(1.05); }
+    88% { transform: translate(4px, 4px) scale(1.04); }
+  }
+  @keyframes cam-shake-strong {
+    0%, 100% { transform: translate(0, 0); }
+    18% { transform: translate(-12px, 8px) scale(1.08); }
+    38% { transform: translate(11px, -9px) scale(1.08); }
+    58% { transform: translate(-9px, -6px) scale(1.07); }
+    80% { transform: translate(8px, 7px) scale(1.06); }
+  }
+
+  /* ===== Game UI (HTML overlay above the AR canvas) ===================== */
+  /* Driven by window.__bookmonUI from the game (shooting-game.ts). Two phases:
+     'kill' (shoot the health gauge) and 'capture' (indicator mini-game). */
+  #game-ui {
+    position: fixed; inset: 0; z-index: 20; pointer-events: none;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    /* Responsive sizing tokens — clamp(min, vmin-based, max) so the HUD scales up
+       on tablets (bigger screen ⇒ bigger UI) while staying sensible on phones.
+       vmin (short side) avoids over-scaling on wide/landscape tablets. */
+    --cap-btn: clamp(136px, 22vmin, 184px);        /* 카메라 버튼 — 누르기 편하게 2배(폰 ≈136px). ⚠ 게이지 폭 계산에도 쓰임 */
+    --cap-gauge-h: clamp(16px, 2.6vmin, 28px);     /* gauge bar height */
+    --cap-bar-pad: clamp(14px, 2.4vmin, 30px);     /* bottom bar padding */
+    --cap-btn-gap: clamp(16px, 2.6vmin, 34px);     /* button inset from right edge */
+    --cap-readout: clamp(11px, 1.9vmin, 18px);     /* center "📷 30초" font size */
+  }
+  #xh-kill, #xh-cap { display: none; }
+  #game-ui[data-phase="kill"] #xh-kill { display: block; }
+  /* 'aim' — the intro phase: ONLY the crosshair (조준점) is shown while we wait
+     for a monster to enter the frame and run the countdown. */
+  #game-ui[data-phase="aim"] #xh-cap { display: block; }
+  #game-ui[data-phase="capture"] #xh-cap { display: block; }
+  #game-ui[data-phase="capture"] #cap-bar { display: flex; }
+  #game-ui[data-phase="capture"] #cap-progress { display: flex; }
+  /* 조준 단계 안내 문구(휴대폰 세우기 / 둘러보기) — bundle 이 __bookmonUI.setHint(text|null) 로 켜고 끈다.
+     ⚠ 수정 시 주의: setHint 는 매 틱 불린다 → 같은 문구면 DOM 을 건드리지 않게 되어 있음(아래 JS). */
+  #aim-hint { position:absolute; left:50%; top:calc(14% + env(safe-area-inset-top,0px)); transform:translateX(-50%); display:none; padding:.5em 1.1em; border-radius:9999px; background:rgba(18,33,58,.72); color:#fff; font:700 clamp(13px,2.4vmin,20px)/1.3 'Noto Sans KR',-apple-system,sans-serif; white-space:nowrap; pointer-events:none; }
+  #aim-hint.show { display:block; animation:hint-bob 1.6s ease-in-out infinite; }
+  /* ===== 포획 연출(capture-fx) — 책이 열리며 빛 기둥으로 몬스터를 빨아들인 뒤 닫힌다(회오리 고리는 뺐다 — 사용자 결정). =====
+     ⚠ 수정 시 주의: 책 그림 capture_book.webp 는 mk_book.glb 를 Blender 로 펼친 14프레임 가로 시트(프레임 600×467 — 선명하게 2배,
+       책등 = 가로 50.1%·세로 66.9%). 시트를 다시 만들면 아래 JS 의 CF 값도 같이 바꿀 것. 퀴즈(z 60)보다 아래(z 45). */
+  /* 포즈(마지막 사진 뒤) — 화면 가운데 크게. 책 연출(z 45)·퀴즈(z 60)보다 아래. */
+  #pose-center { position:fixed; left:50%; top:50%; height:min(66vh, 560px); width:auto; transform:translate(-50%,-50%); z-index:44; pointer-events:none;
+    filter:drop-shadow(0 10px 16px rgba(0,0,0,.4)); }
+  #capture-fx { position:fixed; inset:0; z-index:45; pointer-events:none; overflow:hidden; }
+  #capture-fx > * { position:absolute; }
+  #capture-fx .cf-book { background-repeat:no-repeat; background-size:1400% 100%; transform-origin:50.1% 66.9%; filter:drop-shadow(0 6px 10px rgba(0,0,0,.45)) brightness(1.08) saturate(1.12) contrast(1.05); }
+  /* 빛 기둥 = 받은 영상(shining-light-rays) 앞 2초를 12fps·24프레임 6×4 시트로(검정 바탕 → 밝기만큼 투명). 섞기 모드 대신 투명 PNG 방식인 건
+     AR 카메라 캔버스가 다른 층이라 screen 섞기가 카메라와 안 섞여서(검정이 그대로 보임). 시트를 다시 만들면 JS 의 CR 값도 같이. */
+  #capture-fx .cf-rays { background-repeat:no-repeat; background-size:600% 400%; opacity:0; transition:opacity .45s; }
+  #capture-fx .cf-rays.on { opacity:1; }
+  #capture-fx .cf-flash { width:10px; height:10px; border-radius:50%; transform:translate(-50%,-50%) scale(0); opacity:0; background:radial-gradient(circle, #fff 0 30%, rgba(255,240,190,.8) 50%, rgba(255,255,255,0) 72%); mix-blend-mode:screen; }
+  #capture-fx .cf-spark { width:8px; height:8px; margin:-4px 0 0 -4px; border-radius:50%; background:#fff6c8; box-shadow:0 0 8px 3px rgba(255,230,140,.9); }
+  @keyframes hint-bob { 0%,100%{transform:translate(-50%,0)} 50%{transform:translate(-50%,-4px)} }
+
+  /* Kill-phase crosshair (sniper reticle), centered. */
+  #xh-kill {
+    position: fixed; left: 50%; top: 50%; transform: translate(-50%, -50%);
+    width: 150px; height: auto;
+  }
+
+  /* Capture-phase reticle: viewfinder corner brackets + center circle. The
+     bracket FRAME spans from near the top edge down to JUST ABOVE the gauge bar
+     (so the bottom corners never overlap the gauge / camera button). The aim
+     circle is positioned independently at the true screen centre. */
+  #xh-cap {
+    position: fixed; left: 4vw; right: 4vw; top: 7vh;
+    /* Bottom edge sits above the gauge row + its sweeping arrow. */
+    bottom: calc(var(--cap-bar-pad) + var(--cap-gauge-h) + 46px + env(safe-area-inset-bottom, 0px));
+    transform: none;
+  }
+  #xh-cap .corner {
+    position: absolute; border: 3px solid #fff;
+    width: clamp(30px, 5vmin, 56px); height: clamp(30px, 5vmin, 56px);
+    border-width: clamp(3px, 0.5vmin, 5px);
+  }
+  #xh-cap .corner.tl { left: 0; top: 0; border-right: 0; border-bottom: 0; }
+  #xh-cap .corner.tr { right: 0; top: 0; border-left: 0; border-bottom: 0; }
+  #xh-cap .corner.bl { left: 0; bottom: 0; border-right: 0; border-top: 0; }
+  #xh-cap .corner.br { right: 0; bottom: 0; border-left: 0; border-top: 0; }
+  /* Aim circle — fixed at the TRUE screen centre (aim point), independent of the
+     bracket frame so shifting the frame up never moves the aim reticle. */
+  #xh-cap-center {
+    position: fixed; left: 50%; top: 50%; transform: translate(-50%, -50%);
+    width: clamp(180px, 52.5vmin, 660px); height: auto;   /* 1.5× larger aim circle */
+  }
+  /* Quick reticle pop on each capture (paired with the shutter flash) — applied
+     to the centre aim circle (the frame no longer uses a centering transform). */
+  #xh-cap.snap #xh-cap-center { animation: cap-snap 220ms ease-out; }
+  /* 조준 원(HUD) — 받은 디자인 그림 두 장: aim_ring(북몬이 원 밖, 흰색) / aim_ring_on(원 안 .locked, 청록 빛). 둘 다 깔아 두고 투명도만 바꾼다(처음 바뀔 때 깜빡임 방지).
+     ⚠ 수정 시 주의: 보이지 않는 #xh-ring 요소의 반지름(window.__bmRingR)이 bundle 의 조준·발견(카운트다운) 판정 기준이고,
+     그림은 그 원에 점선 원이 맞도록 키운다 — 그림 960×720 에서 점선 반지름 348px → 폭 = 요소 폭 × 960/696(137.93%). 그림을 바꾸면 이 배율도 다시 잴 것.
+     흰 그림은 밝은 카메라 화면에서도 보이게 옅은 검은 그림자를 깐다. */
+  #xh-cap .corner, #xh-cap-center { display: none !important; }
+  #xh-ring { position: fixed; left: 50%; top: 50%; width: min(62vmin, 560px); aspect-ratio: 1; transform: translate(-50%, -50%); pointer-events: none; }
+  #xh-ring::before, #xh-ring::after { content: ''; position: absolute; left: 50%; top: 50%; width: 137.93%; aspect-ratio: 4 / 3; transform: translate(-50%, -50%);
+    background: url('assets/aim_ring.webp') center / 100% 100% no-repeat; filter: drop-shadow(0 0 1px rgba(0,0,0,.5)); transition: opacity .18s; }
+  #xh-ring::after { background-image: url('assets/aim_ring_on.webp'); filter: none; opacity: 0; }
+  #xh-ring.locked::before { opacity: 0; }
+  #xh-ring.locked::after { opacity: 1; }
+  #xh-cap.snap #xh-ring { animation: ring-snap 220ms ease-out; }
+  @keyframes ring-snap { 0%,100% { transform: translate(-50%,-50%) scale(1); } 35% { transform: translate(-50%,-50%) scale(1.06); } }
+  /* 북몬 찾기 전(aim 단계, .found 없음): 사각 카메라 프레임은 숨기고 조준선만 2배로. 찾은 뒤부터 프레임 표시·원래 크기.
+     ⚠ 수정 시 주의: .found 는 __bookmonUI.fireDiscovery 가 켜고 setPhase('aim')(새 판 시작)이 끈다. */
+  #xh-cap-center { transition: width .35s ease; }
+  #game-ui[data-phase="aim"]:not(.found) #xh-cap .corner { display: none; }
+  #game-ui[data-phase="aim"]:not(.found) #xh-cap-center { width: clamp(360px, 105vmin, 1320px); }
+  @keyframes cap-snap {
+    0% { transform: translate(-50%, -50%) scale(1); }
+    35% { transform: translate(-50%, -50%) scale(1.12); }
+    100% { transform: translate(-50%, -50%) scale(1); }
+  }
+  /* Miss feedback — a quick red flash on the corner brackets when the shutter is
+     pressed without the monster locked on. */
+  #xh-cap.miss .corner { animation: cap-miss 0.3s ease-out; }
+  @keyframes cap-miss {
+    0%, 100% { border-color: #fff; }
+    40% { border-color: #ff5a5a; }
+  }
+
+  /* ===== Intro sequence (crosshair-only → discovery → 3·2·1 → 시작!) ======
+     1) 'aim' phase shows ONLY the crosshair.
+     2) When a monster enters the frame, #discover-fx (effect.png) bursts AT the
+        monster's on-screen position ("발견!" feel).
+     3) A 3·2·1 countdown, then the #start-banner (start.png, "Go").
+     4) The capture bar appears and the mini-game begins. */
+  /* Discovery burst — centered ON THE MONSTER (Figma: the burst surrounds the monster).
+     left/top are set inline from the monster's screen position (% of the viewport) and
+     follow it while it walks in; falls back to screen center when no position is known. */
+  #discover-fx {
+    position: fixed; left: 50%; top: 50%; width: min(120vw, 820px); height: auto;
+    transform: translate(-50%, -50%) scale(0.4); opacity: 0; pointer-events: none;
+    display: none; z-index: 22;
+  }
+  #discover-fx.play { display: block; animation: discover-fx 950ms ease-out forwards; }
+  @keyframes discover-fx {
+    0%   { transform: translate(-50%, -50%) rotate(0deg) scale(0.4); opacity: 0; }
+    25%  { opacity: 1; }
+    60%  { transform: translate(-50%, -50%) rotate(140deg) scale(1.15); opacity: 0.9; }
+    100% { transform: translate(-50%, -50%) rotate(210deg) scale(1.5); opacity: 0; }
+  }
+
+  /* Countdown (3·2·1): a full-screen FLEX wrapper centers the number image so it's
+     centered regardless of the glyph's width or the viewport orientation. The
+     glyphs are TALL, so the image is sized by height. */
+  #countdown {
+    position: fixed; inset: 0; display: none; z-index: 23; pointer-events: none;
+    align-items: center; justify-content: center;
+  }
+  #countdown.show { display: flex; }
+  /* Per-digit optical-centering shift lives on a WRAPPER (static), separate from
+     the img's scale animation, so the correction always holds. Each glyph's
+     visual mass is off-centre in its own image (esp. "1", ~15% right).
+     translateX(%) is relative to the wrapper's own width (= img width), so it
+     stays correct at any size. */
+  #countdown .cd-inner { display: block; transform: translateX(var(--cd-shift, 0%)); }
+  #countdown.n1 .cd-inner { --cd-shift: -15%; }
+  #countdown.n2 .cd-inner { --cd-shift: -2%; }
+  #countdown.n3 .cd-inner { --cd-shift: -5%; }
+  #countdown-img { height: min(42vh, 340px); width: auto; display: block; }
+  #countdown.show #countdown-img { animation: count-pop 1s ease-out; }
+  @keyframes count-pop {
+    0%   { transform: scale(0.35); opacity: 0; }
+    22%  { transform: scale(1.12); opacity: 1; }
+    62%  { transform: scale(1); opacity: 1; }
+    100% { transform: scale(0.9); opacity: 0; }
+  }
+
+  #start-banner {
+    position: fixed; left: 50%; top: 50%; transform: translate(-50%, -50%);
+    width: calc(min(42vh, 340px) * 1.1); max-width: 80vw; height: auto; display: none; z-index: 23;
+    /* Go 는 숫자(3·2·1, 높이 기준)와 같은 기준 — 너비 ≈ 숫자 높이 × 1.1(Figma 비율).
+       이미지 비율은 그대로(height:auto), 태블릿 등 어떤 화면에서도 넘치지 않게 max-width. */
+  }
+  #start-banner.play { display: block; animation: start-banner 900ms ease-out forwards; }
+  @keyframes start-banner {
+    0%   { transform: translate(-50%, -50%) scale(0.6); opacity: 0; }
+    25%  { transform: translate(-50%, -50%) scale(1.08); opacity: 1; }
+    70%  { transform: translate(-50%, -50%) scale(1); opacity: 1; }
+    100% { transform: translate(-50%, -50%) scale(1); opacity: 0; }
+  }
+
+  /* Capture progress dots (top-center): one per required capture, filled green
+     as each catch lands. The required count is random (1..3) per run. */
+  #cap-progress {
+    position: fixed; left: 50%; top: calc(14px + env(safe-area-inset-top, 0px));
+    transform: translateX(-50%); display: none; gap: 9px; align-items: center;
+    z-index: 21; pointer-events: none;
+  }
+  #cap-progress .dot {
+    width: 14px; height: 14px; border-radius: 50%;
+    background: rgba(255, 255, 255, 0.3); border: 2px solid rgba(255, 255, 255, 0.75);
+    transition: background 0.2s ease, box-shadow 0.2s ease;
+  }
+  #cap-progress .dot.done {
+    background: #38ff9e; border-color: #38ff9e; box-shadow: 0 0 8px rgba(56, 255, 158, 0.9);
+  }
+
+  /* Capture bottom bar (per the mock): a SLIM gauge, ~60% of the screen wide,
+     dead-centered horizontally; the camera button floats at the bottom-right. */
+  #cap-bar {
+    position: fixed; left: 0; right: 0; bottom: 0; display: none;
+    align-items: center; justify-content: center;
+    padding: var(--cap-bar-pad) 16px calc(var(--cap-bar-pad) + 4px + env(safe-area-inset-bottom, 0px));
+    box-sizing: border-box; pointer-events: none;
+  }
+  /* Slim gauge — centered; width caps keep it clear of the (responsive) camera
+     button on both sides so it stays at the true horizontal centre. */
+  #cap-gauge {
+    position: relative; flex: 0 0 auto; height: var(--cap-gauge-h);
+    /* ~70% of the screen (per the reference), but never so wide it collides with
+       the camera button on either side. No fixed max cap — it scales with the
+       screen so tablets don't leave it tiny. */
+    width: min(70vw, 100vw - (2 * var(--cap-btn) + 3 * var(--cap-btn-gap)));
+  }
+  /* All gauge layers share border-radius:999px so their corners are unified
+     into one pill. The track clips the zone; the frame is a separate top
+     overlay (so the zone never hides it). No `border` anywhere — a real
+     border + radius + overflow leaves square-ish corners in WebKit.
+     Colours sampled from the reference artwork (Frame 175.png). */
+  #cap-track {
+    position: absolute; inset: 0; border-radius: 999px; overflow: hidden;
+    /* Glossy green cylinder — exact design gradient (from the design source). */
+    background: linear-gradient(180deg,
+      #6EB62D 14.29%, #D6FF5B 27.47%, #BAF154 45.6%, #68AC28 60.03%, #418700 77.34%);
+    box-shadow: 0 3px 6px rgba(0, 0, 0, 0.45);
+  }
+  /* CAPTURE ZONE — the centered dark-green band. The sweeping arrow must be
+     inside it when the shutter is pressed; it SHRINKS after every catch so the
+     difficulty ramps up. Its own pill radius keeps both ends rounded at every
+     width. NOTE: no CSS transform — JS sets `left`+`width` to center it (a
+     `translateX` child breaks the parent's rounded clip in WebKit). */
+  #cap-zone {
+    position: absolute; top: 0; bottom: 0; left: 33%; width: 34%;
+    /* Dark-green OVERLAY on the glossy track. Vertical alpha profile measured
+       from the artwork (highlight glints through at the top, solid dark from
+       ~2/3 down). Left/right edges are HARD, exactly as in the artwork. */
+    background: linear-gradient(180deg,
+      rgba(0, 58, 27, 0) 0%, rgba(0, 58, 27, 0.19) 24%,
+      rgba(0, 58, 27, 0.42) 42%, rgba(0, 58, 27, 0.68) 55%,
+      rgba(0, 58, 27, 1) 67%, rgba(0, 58, 27, 1) 100%);
+    transition: left 0.45s cubic-bezier(0.22, 1, 0.36, 1),
+                width 0.45s cubic-bezier(0.22, 1, 0.36, 1);
+  }
+  /* Shrink emphasis — quick brighten so each difficulty step reads clearly. */
+  #cap-zone.shrink { animation: zone-shrink 0.6s ease-out; }
+  @keyframes zone-shrink {
+    0% { filter: brightness(2); }
+    100% { filter: brightness(1); }
+  }
+  /* Wood-brown frame ring — drawn on TOP so the zone never covers it. Slim ring
+     to match the slim bar; lighter top rim, darker bottom (per the artwork). */
+  #cap-frame {
+    position: absolute; inset: 0; border-radius: 999px; pointer-events: none; z-index: 2;
+    box-shadow: inset 0 0 0 2.5px #73411a,
+                inset 0 3px 0 -1px rgba(150, 88, 34, 0.55),
+                inset 0 -3px 0 -1px rgba(90, 50, 18, 0.6),
+                0 0 0 1px rgba(60, 32, 10, 0.45);
+  }
+  /* Sweeping indicator arrow (indi.png) above the gauge, pointing down at it.
+     NOTE: no `will-change` here. `will-change: left` gave no compositing benefit
+     (left can't be composited) yet forced a GPU layer that, combined with the
+     drop-shadow filter, made the arrow VANISH on Android Chrome/WebView during
+     the capture flash. The shadow lives on a wrapper span so the arrow image
+     itself carries no filter (belt-and-suspenders against the same bug). */
+  #cap-indi {
+    position: absolute; bottom: 100%; left: 4%; z-index: 5;
+    transform: translate(-50%, -3px);
+    display: block; line-height: 0;
+    filter: drop-shadow(0 2px 3px rgba(0, 0, 0, 0.4));
+  }
+  #cap-indi img { width: clamp(20px, 3.2vmin, 32px); height: auto; display: block; }
+  #cap-indi.miss img { animation: indi-miss 0.3s ease-out; }
+  @keyframes indi-miss {
+    0%,100% { filter: none; }
+    50% { filter: drop-shadow(0 0 6px #ff5a5a); }
+  }
+  /* Center readout (per the mock): a small yellow camera glyph + "30초" inline,
+     dead-center ON the bar, yellow #EDD927 with a dark shadow for contrast. */
+  #cap-center {
+    position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%);
+    display: flex; align-items: center; gap: 0.28em; z-index: 3; pointer-events: none;
+    color: #f2dc32; font-weight: 800; font-size: var(--cap-readout); line-height: 1;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    /* Tight, dark shadow hugging the glyphs (no soft spread). */
+    text-shadow: 0 1px 0 rgba(0, 0, 0, 0.9), 0 0 1px rgba(0, 0, 0, 0.85);
+    white-space: nowrap;
+  }
+  #cap-cam-icon {
+    width: 0.95em; height: 0.95em; flex: 0 0 auto;
+    filter: drop-shadow(0 1px 0 rgba(0, 0, 0, 0.9));
+  }
+  #cap-cam-icon svg { width: 100%; height: 100%; display: block; }
+  /* Camera button — pinned to the bar's right edge (absolute, so it doesn't
+     push the gauge off the screen's horizontal centre). */
+  #cap-camera {
+    position: absolute; right: var(--cap-btn-gap);
+    /* ⚠ 수정 시 주의: 2배로 키운 뒤로는 게이지 줄 가운데에 맞추면 화면 아래로 삐져나간다 → 오른쪽 아래 모서리에 붙인다. */
+    /* 보이는 버튼의 아랫선 = 게이지바 아랫선(바 아래 여백 pad+4px). cam_normal.png 는 아래 18%·오른쪽 19.5% 가 투명 여백이라 그만큼 뺀다.
+       ⚠ 버튼 이미지를 바꾸면 이 비율(0.18 / 0.195)도 다시 잴 것. */
+    top: auto; bottom: calc(var(--cap-bar-pad) + 4px + env(safe-area-inset-bottom, 0px) - var(--cap-btn) * 0.18);
+    right: calc(max(var(--cap-btn-gap), env(safe-area-inset-right, 0px)) - var(--cap-btn) * 0.195);
+    transform: none;
+    pointer-events: auto; border: none; background: none; padding: 0;
+    width: var(--cap-btn); height: var(--cap-btn);
+    outline: none; -webkit-appearance: none; appearance: none;
+    -webkit-tap-highlight-color: transparent;
+    -webkit-user-select: none; user-select: none;
+  }
+  /* Invisible enlarged tap target (image keeps the button size). */
+  #cap-camera::before {
+    content: ''; position: absolute; inset: -22px; border-radius: 50%;
+  }
+  /* Kill the focus/active ring entirely (some browsers draw a pink/dotted
+     outline around the tapped camera button). */
+  #cap-camera:focus,
+  #cap-camera:focus-visible,
+  #cap-camera:active { outline: none; border: none; box-shadow: none; }
+  #cap-camera img {
+    width: 100%; height: 100%; display: block; border: none; outline: none;
+    pointer-events: none; -webkit-user-drag: none; user-select: none;
+    transition: transform 0.08s ease, filter 0.08s ease;
+  }
+  /* Press effect (replaces the old cam_press.png image swap). */
+  #cap-camera.pressing img,
+  #cap-camera:active img { transform: scale(0.86); filter: brightness(0.8); }
+  /* Cooldown after a successful capture — dimmed + not pressable for ~2s. */
+  #cap-camera.cooldown { pointer-events: none; }
+  #cap-camera.cooldown img { filter: grayscale(0.5) brightness(0.6); opacity: 0.6; }
+
+  /* ===== 8th Wall motion-sensor prompt restyle ==========================
+     The engine (xr.js) injects its own permission prompt when it can't preempt
+     motion access. Its markup is fixed:
+       .prompt-box-8w > p + .prompt-button-container-8w > .prompt-button-8w[.button-primary-8w]
+     The engine's own <style> uses single-class selectors, so !important here
+     wins regardless of injection order. (Text is relabeled via JS below.)
+     To REVERT: delete this block and the `customize 8th Wall prompt` script. */
+  .prompt-box-8w {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif !important;
+    width: 18em !important; max-width: 86% !important;
+    border-radius: 16px !important; padding: 22px 18px 16px !important;
+    color: #16213a !important; font-size: 16px !important;
+    background-color: #ffffff !important;
+    filter: none !important; box-shadow: 0 10px 34px rgba(0, 0, 0, 0.28) !important;
+  }
+  .prompt-box-8w p { margin: 2px 6px 18px !important; line-height: 1.55 !important; font-weight: 600 !important; }
+  .prompt-button-container-8w { display: flex !important; gap: 10px !important; }
+  .prompt-button-8w {
+    flex: 1 0 0 !important; border-radius: 999px !important; padding: 12px 0 !important;
+    font-weight: 700 !important; border: none !important; outline: none !important;
+    background-color: #e7e9ef !important; color: #3a4152 !important;
+    -webkit-tap-highlight-color: transparent !important;
+  }
+  .prompt-button-8w:not(:last-child) { margin-right: 0 !important; }
+  .prompt-button-8w.button-primary-8w { background-color: #16213a !important; color: #ffffff !important; }
+  /* ===== 퀴즈(카메라 위) — front QuizLayer 충실 포팅(바닐라). =====
+     ⚠ 수정 시 주의: 크기·위치는 레퍼런스 목업(1027×638, 책 표지 폭 710px)을 카드 폭(cqw) 비율로 옮긴 값이다.
+       quiz_frame.png 는 표지 둘레에 투명 여백이 있어 표지 = 카드 폭의 86.7%. 이미지를 바꾸면 cqw 값 전부 다시 잴 것.
+       .q-wrap 의 0.75 = (카드 높이 67.5cqw + 게이지) ÷ 폭 — 줄이면 가로 폰에서 게이지가 화면 밖으로 잘린다. */
+  @keyframes q-answer-pop { 0%{transform:scale(.3);opacity:0} 55%{transform:scale(1.18);opacity:1} 75%{transform:scale(.94)} 100%{transform:scale(1);opacity:1} }
+  @keyframes q-confetti-fly { 0%{transform:translate(0,0) rotate(0) scale(1);opacity:1} 70%{opacity:1} 100%{transform:translate(var(--cx),var(--cy)) rotate(var(--cr)) scale(.7);opacity:0} }
+  #quiz-ui { position:fixed; inset:0; z-index:60; display:none; align-items:center; justify-content:center; background:rgba(18,33,58,.55);
+    padding:calc(12px + env(safe-area-inset-top,0px)) 12px calc(12px + env(safe-area-inset-bottom,0px)); }
+  #quiz-ui.show { display:flex; }
+  /* Quiz font: Noto Sans KR (buttons don't inherit font-family, so include *). */
+  #quiz-ui, #quiz-ui * {
+    box-sizing:border-box;
+    font-family:'Noto Sans KR', -apple-system, BlinkMacSystemFont, "Apple SD Gothic Neo", "Malgun Gothic", sans-serif;
+  }
+  /* The whole quiz (card + gauge) scales AS ONE with the screen while keeping its
+     proportions: no fixed px cap — the width is driven by the viewport (vw) and
+     capped by height (vh) so on a 16:10 tablet the card+gauge always fit and grow
+     with the screen. `container-type` makes the gauge use the SAME cqw scale as
+     the card, so both stay in proportion at every size. */
+  /* Width is capped BY HEIGHT so the whole stack (card ≈0.675×w + gap + gauge)
+     always fits inside the visible viewport (dvh = real height minus browser UI)
+     minus the safe-area/padding — the gauge can never be clipped off-screen.
+     Divisor 0.76 is the safe minimum: any lower clips the card vertically on
+     landscape/tablet (the stack already uses most of the height there). vw cap
+     98vw lets portrait screens use nearly the full width. Together these enlarge
+     the card as much as possible WITHOUT ever clipping the gauge off-screen. */
+  .q-wrap { container-type:inline-size; display:flex; flex-direction:column; align-items:center; gap:0;
+    width:min(98vw, calc((100dvh - 24px - env(safe-area-inset-top,0px) - env(safe-area-inset-bottom,0px)) / 0.75)); }
+  .q-card { container-type:inline-size; position:relative; width:100%; aspect-ratio:1400/945; background:url('assets/quiz/quiz_frame.png') 0 0/100% 100% no-repeat; }
+  .q-inner { position:absolute; left:8%; right:9%; top:11.6cqw; height:40.2cqw; display:flex; flex-direction:column; }
+  .q-title { text-align:center; }
+  .q-title p { margin:0; padding:0 2%; font-size:4cqw; line-height:1.2; font-weight:700; color:#3b5ba5; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .q-title .rule { margin:2.1cqw auto 0; height:0.37cqw; min-height:2px; width:65%; border-radius:9999px; background:#4f6fb8; }
+  .q-question { flex:1; min-height:0; display:flex; align-items:center; justify-content:center; overflow:hidden; padding:0 1cqw; }
+  .q-question p { margin:0; max-width:64cqw; text-align:center; font-weight:500; color:#222; word-break:keep-all; white-space:pre-line; } /* 문항 속 줄바꿈 문자 = 화면 줄바꿈 */
+  .q-blank { display:inline-block; width:13.4cqw; height:2.9cqw; margin:0 1cqw; vertical-align:middle; border:max(1px,0.25cqw) solid #4a6db5; border-radius:0.2cqw; background:#fff; }
+  .q-pills { margin:0 auto; display:grid; width:61.9cqw; grid-template-columns:repeat(2, minmax(0, 1fr)); column-gap:8.7cqw; row-gap:1.1cqw; }
+  .q-pills.tworows { }
+  .q-pill { position:relative; display:grid; place-items:center; height:6.7cqw; width:100%; min-width:0; margin:0; line-height:1.15; -webkit-appearance:none; appearance:none; border-radius:1cqw; border:max(2px,0.37cqw) solid #78b1ec; background:#fff; color:#111; font-weight:600; font-size:2.4cqw; padding:0 1cqw; box-shadow:0 0.3cqw 0.7cqw rgba(60,110,180,.28); transition:.1s; cursor:pointer; }
+  /* ⚠ 수정 시 주의: 앱에 주입(embed)되면 앱 공통 CSS(globals.css 의 button 최소 48×48 터치 타겟 등)가 이 화면에도 먹는다.
+     퀴즈·포획 버튼은 자체 크기를 쓰므로 되돌린다(퀴즈 보기 버튼이 35→48px 로 두꺼워졌던 문제). id 선택자라 우선순위가 높다. */
+  #quiz-ui button, #game-ui button { min-height: 0; min-width: 0; }
+  .q-pill > span { display:block; width:100%; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .q-pill:active { transform:translateY(3px) scale(.98); background:#78b1ec; color:#fff; }
+  .q-pill.dead { pointer-events:none; opacity:.35; filter:grayscale(1); }
+  .q-ox { margin-top:auto; display:flex; align-items:center; justify-content:center; gap:24%; padding:0 8% 1%; }
+  .q-oxbtn { position:relative; display:grid; place-items:center; aspect-ratio:1/1; width:22%; border-radius:9999px; border:5px solid; background:#fff; box-shadow:0 6px 10px rgba(0,0,0,.18); transition:.1s; cursor:pointer; }
+  .q-oxbtn:active { transform:translateY(3px) scale(.97); }
+  .q-oxbtn.dead { pointer-events:none; opacity:.35; filter:grayscale(1); }
+  .q-oxbtn svg { width:58%; height:58%; }
+  /* Gauge sized in cqw (same container as the card) so it scales in proportion
+     with the card on every screen. Width ~72% of the card matches the mock. */
+  .q-gauge { width:79%; margin-top:-1.6cqw; flex-shrink:0; border-radius:9999px; padding:0.5cqw; background:#724019; box-shadow:0 4px 8px rgba(0,0,0,.35); }
+  .q-track { position:relative; height:2.9cqw; min-height:12px; overflow:hidden; border-radius:9999px; background:#372314; }
+  .q-fill { height:100%; border-radius:9999px; background:linear-gradient(180deg,#6eb72d,#055a25); box-shadow:inset 0 2px 2px rgba(255,255,255,.45); transition:width .1s linear; }
+  .q-secs { position:absolute; inset:0; display:flex; align-items:center; justify-content:center; font-size:max(11px, 2.2cqw); font-weight:800; color:#ffdd32; text-shadow:0 1px 1px rgba(0,0,0,.5); }
+  .q-result { position:absolute; inset:0; z-index:10; display:flex; align-items:center; justify-content:center; pointer-events:none; }
+  .q-result .mark { font-size:14cqw; font-weight:700; line-height:1; animation:q-answer-pop 520ms cubic-bezier(.34,1.56,.64,1) both; text-shadow:0 3px 0 rgba(0,0,0,.18),0 6px 10px rgba(0,0,0,.25); }
+  .q-confetti { position:absolute; left:50%; top:50%; width:0; height:0; }
+  .q-confetti span { position:absolute; left:0; top:0; display:block; width:7px; height:10px; border-radius:1px; animation:q-confetti-fly 900ms ease-out forwards; }</style><div id="boot-overlay"><span class="loading">loading<span class="dots"></span></span><p class="desktop-hint">이 콘텐츠는 <b>모바일 기기</b>의 카메라가 필요합니다.<br>휴대폰 브라우저에서 이 페이지를 열어주세요.</p></div><div id="shot-flash"></div><div id="shutter-blades" aria-hidden="true"><span class="blade top"></span><span class="blade bot"></span></div><div id="shutter-flash"></div><div id="result-fx" aria-hidden="true"></div><div id="result-white" aria-hidden="true"></div><div id="game-ui" data-phase="none"><div id="aim-hint" aria-live="polite"></div><img id="xh-kill" src="assets/kill_white.png" alt=""><div id="xh-cap"><span class="corner tl"></span><span class="corner tr"></span> <span class="corner bl"></span><span class="corner br"></span> <div id="xh-ring"></div><img id="xh-cap-center" src="assets/cap_white.png" alt=""></div><img id="discover-fx" src="assets/ar_effect1.png" alt=""><div id="countdown"><span class="cd-inner"><img id="countdown-img" src="assets/start_3.png" alt=""></span></div><img id="start-banner" src="assets/start.png" alt=""><div id="cap-progress"></div><div id="cap-bar"><div id="cap-gauge"><div id="cap-track"><div id="cap-zone"></div></div><div id="cap-frame"></div><span id="cap-indi"><img src="assets/indi.png" alt=""></span><span id="cap-center" aria-hidden="true"><span id="cap-cam-icon"><svg viewBox="0 0 24 24" fill="#f2dc32"><path d="M9 3l-1.2 1.6H4.5A1.5 1.5 0 0 0 3 6.1v11A1.5 1.5 0 0 0 4.5 18.6h15A1.5 1.5 0 0 0 21 17.1v-11a1.5 1.5 0 0 0-1.5-1.5h-3.3L15 3H9z"></path><circle cx="12" cy="11.5" r="3.4" fill="#1a3a12"></circle></svg> </span><span class="t"><span id="cap-secs">30</span>초</span></span></div><button id="cap-camera" type="button" aria-label="capture"><img src="assets/cam_normal.png" alt=""></button></div></div><script>// === iOS motion-sensor permission (preempt 8th Wall's built-in prompt) =====
+  // World-tracking AR needs the gyroscope/accelerometer. On iOS 13+ that
+  // permission can only be requested from inside a user gesture, so the engine
+  // otherwise shows its own "AR requires access to device motion sensors" prompt
+  // to obtain that gesture. By requesting it ourselves on the FIRST tap (which is
+  // the landing-page start tap), the permission is already granted by the time
+  // the engine needs it, so the engine's separate prompt is skipped.
+  ;(function () {
+    var DME = window.DeviceMotionEvent
+    var DOE = window.DeviceOrientationEvent
+    var askMotion = DME && typeof DME.requestPermission === 'function'
+    var askOrient = DOE && typeof DOE.requestPermission === 'function'
+    if (!askMotion && !askOrient) return   // Android / desktop: no gate to preempt
+
+    // ---- Detect an already-granted state so we DON'T request again ---------
+    // iOS Safari has no query API for motion permission (navigator.permissions
+    // doesn't support it). But when permission is already granted, motion/orient
+    // events fire; when not, they never fire. So we listen passively: a real
+    // reading means "already granted" → skip requestPermission (and its dialog).
+    var granted = false
+    function markGranted() { granted = true; stopProbe() }
+    function onMotion(e) {
+      if (e && (e.accelerationIncludingGravity || e.acceleration || e.rotationRate)) markGranted()
+    }
+    function onOrient(e) {
+      if (e && (e.alpha !== null || e.beta !== null || e.gamma !== null)) markGranted()
+    }
+    function stopProbe() {
+      window.removeEventListener('devicemotion', onMotion)
+      window.removeEventListener('deviceorientation', onOrient)
+    }
+    window.addEventListener('devicemotion', onMotion)
+    window.addEventListener('deviceorientation', onOrient)
+    // Best-effort spec query (some Chromium browsers support it; iOS throws).
+    try {
+      if (navigator.permissions && navigator.permissions.query) {
+        navigator.permissions.query({name: 'accelerometer'})
+          .then(function (s) { if (s && s.state === 'granted') granted = true })
+          .catch(function () {})
+      }
+    } catch (e) { /* no-op */ }
+
+    // ---- Request on the first gesture, only if not already granted ---------
+    var done = false
+    function request() {
+      if (done) return
+      done = true
+      document.removeEventListener('pointerdown', request, true)
+      document.removeEventListener('touchend', request, true)
+      document.removeEventListener('click', request, true)
+      if (granted) { stopProbe(); return }   // already granted → no call, no dialog
+      // Not known-granted → request now. If it turns out already granted, iOS
+      // resolves 'granted' silently (no dialog); otherwise the dialog shows once.
+      try { if (askMotion) DME.requestPermission().catch(function () {}) } catch (e) {}
+      try { if (askOrient) DOE.requestPermission().catch(function () {}) } catch (e) {}
+      stopProbe()
+    }
+    // Capture phase so we run on the first gesture before other handlers.
+    document.addEventListener('pointerdown', request, true)
+    document.addEventListener('touchend', request, true)
+    document.addEventListener('click', request, true)
+  })()
+
+  // === keep fullscreen across page navigation (Android) ====================
+  // The host app enters the Fullscreen API on its start gate, but the top-level
+  // navigation to this AR page DROPS fullscreen (it's document-bound). Re-enter
+  // on the first user gesture here (8th Wall's start tap provides the required
+  // activation). iOS Safari has no Fullscreen API → silent no-op (PWA covers it).
+  // To REVERT: delete this IIFE.
+  ;(function () {
+    var el = document.documentElement
+    var req = el.requestFullscreen || el.webkitRequestFullscreen
+    if (!req) return
+    var fsDone = false
+    function goFs() {
+      if (fsDone) return
+      fsDone = true
+      document.removeEventListener('pointerdown', goFs, true)
+      document.removeEventListener('touchend', goFs, true)
+      document.removeEventListener('click', goFs, true)
+      function lockLandscape() {
+        try { var o = screen.orientation; if (o && o.lock) { var p = o.lock('landscape'); if (p && p.catch) p.catch(function(){}) } } catch (e) {}
+      }
+      try {
+        if (!document.fullscreenElement) {
+          var r = req.call(el)
+          if (r && r.then) r.then(lockLandscape).catch(function () {})
+          else setTimeout(lockLandscape, 120)
+        } else { lockLandscape() }
+      } catch (e) { /* unsupported/denied → ignore */ }
+    }
+    document.addEventListener('pointerdown', goFs, true)
+    document.addEventListener('touchend', goFs, true)
+    document.addEventListener('click', goFs, true)
+  })()
+
+  // === customize 8th Wall prompt ==========================================
+  // If the engine still shows its motion-sensor prompt (.prompt-box-8w), relabel
+  // its text to Korean. Styling is handled by the CSS block above.
+  // To REVERT: delete this IIFE and the `.prompt-box-8w` CSS block.
+  ;(function () {
+    function apply(box) {
+      if (!box || box.__bmDone) return
+      box.__bmDone = true
+      var p = box.querySelector('p')
+      if (p) p.textContent = 'AR을 시작하려면 기기의 모션 센서 접근 권한이 필요합니다.'
+      var btns = box.querySelectorAll('.prompt-button-8w')
+      if (btns[0]) btns[0].textContent = '취소'
+      if (btns[1]) btns[1].textContent = '계속'
+    }
+    function scan(node) {
+      if (!node || node.nodeType !== 1) return
+      if (node.classList && node.classList.contains('prompt-box-8w')) { apply(node); return }
+      if (node.querySelector) { var b = node.querySelector('.prompt-box-8w'); if (b) apply(b) }
+    }
+    scan(document.querySelector('.prompt-box-8w'))   // in case it already exists
+    try {
+      var mo = new MutationObserver(function (muts) {
+        for (var i = 0; i < muts.length; i++) {
+          var added = muts[i].addedNodes
+          for (var j = 0; j < added.length; j++) scan(added[j])
+        }
+      })
+      mo.observe(document.body, {childList: true, subtree: true})
+    } catch (e) { /* no-op */ }
+  })()
+
+  // === Host-app contract (top-level page navigation) =====================
+  // This build runs as a FULL PAGE (not an iframe) entered at /ar/shooting/ with
+  // NO URL query. All input comes from the host via sessionStorage:
+  //   sessionStorage['bookmon-ar-req'] = { mid, nonce, ts, image, captures, return }
+  //     image    : sprite to fight (empty/absent → bundled fallback; read by config.ts)
+  //     captures : catches required to win (absent/invalid → 3; read by config.ts)
+  //     return   : path to navigate to on finish (same-origin relative only)
+  //     nonce    : echoed back in the result
+  //     mid/ts   : reference only
+  // On finish we DO NOT postMessage. Instead we record the result and navigate:
+  //   sessionStorage['bookmon-ar-res'] = {ar:'success'|'fail'|'close'[, nonce]}
+  //   location.assign(<return>)
+
+  // === DEV-ONLY test seed ================================================
+  // Standalone local testing has no host to write `bookmon-ar-req`. On a dev host
+  // (localhost / LAN IP) we seed a request pointing at the bundled TEST sprite
+  // sheets (assets/sprites/, gitignored). We also UPGRADE a stale dev req that
+  // predates sprites (so an old sessionStorage entry from an earlier test still
+  // gets the sheets). In production the host writes a real record first and this
+  // never runs (non-dev host, or the req already carries sprites).
+  // To REMOVE: delete this IIFE and src/assets/sprites/.
+  ;(function () {
+    try {
+      var h = location.hostname || ''
+      var isDev = h === 'localhost' || h === '127.0.0.1' ||
+        /^192\.168\./.test(h) || /^10\./.test(h) || /^172\.(1[6-9]|2\d|3[01])\./.test(h)
+      if (!isDev) return
+
+      var existing = null
+      try { existing = JSON.parse(sessionStorage.getItem('bookmon-ar-req') || 'null') } catch (e) {}
+      // Decide INDEPENDENTLY whether the sprites and/or the quiz still need
+      // seeding — a stale dev session that already has sprites (but no quiz, or
+      // the removed 01_* test sheets) must still get the missing piece. (An older
+      // rule returned as soon as sprites existed, so the sample quiz was never
+      // injected → the post-capture quiz never appeared.)
+      var sp0 = existing && existing.sprites
+      var hasSprites = sp0 && (sp0.idle || sp0.left || sp0.right || sp0.hit)
+      var stale01 = hasSprites && /assets\/sprites\/01_/.test(String(sp0.idle || sp0.left || ''))
+      var needSprites = !hasSprites || stale01
+      var needQuiz = !(existing && existing.quiz && existing.quiz.content)
+      if (!needSprites && !needQuiz) return
+
+      var seed = existing || {mid: 'dev', nonce: 'dev', ts: Date.now(), image: '', captures: 3, return: ''}
+      if (needSprites) {
+        seed.sprites = {
+          idle: 'assets/sprites/P_idle.png',
+          left: 'assets/sprites/P_run_L.png',
+          right: 'assets/sprites/P_run_R.png',
+          hit: '',
+        }
+      }
+      // standalone 테스트용 샘플 퀴즈(호스트가 안 줄 때만). 포획 성공 후 카메라 위에 뜬다.
+      if (needQuiz) {
+        seed.quiz = {
+          content: '책의 정령몬스터들을 찾아 떠나는, 이 독서 행사의 이름은?',
+          type: 'CHOICE',
+          choice1: 'BOOKMAN', choice2: 'BOOKMON', choice3: 'BOOKMOM', choice4: 'BOOKMONG',
+          answer: 2, description: null, title: '테스트 몬스터',
+        }
+      }
+      sessionStorage.setItem('bookmon-ar-req', JSON.stringify(seed))
+    } catch (e) { /* no-op */ }
+  })()
+
+  // 체험모드(req.untimed) — 포획·퀴즈 시간 제한 없음. 재시작마다 req 가 바뀌므로 매번 최신 값을 읽는다.
+  window.__bookmonUntimed = function () { try { var r = JSON.parse(sessionStorage.getItem('bookmon-ar-req') || 'null'); return !!(r && r.untimed) } catch (e) { return false } }
+
+  // Read + parse the host request record once (null when absent/unparseable).
+  var __bmReq = (function () {
+    try {
+      var raw = sessionStorage.getItem('bookmon-ar-req')
+      return raw ? JSON.parse(raw) : null
+    } catch (e) { return null }
+  })()
+
+  // The nonce to echo back (null when absent). 단일 문서 재사용 시 재시작마다 req(nonce)가
+  // 바뀌므로 항상 최신 sessionStorage 에서 읽는다(로드 1회 파싱본 __bmReq 대신).
+  function bmReqNonce() {
+    try {
+      var raw = sessionStorage.getItem('bookmon-ar-req')
+      var r = raw ? JSON.parse(raw) : null
+      return (r && r.nonce != null) ? r.nonce : null
+    } catch (e) { return (__bmReq && __bmReq.nonce != null) ? __bmReq.nonce : null }
+  }
+  // The validated return path. OPEN-REDIRECT GUARD: only a same-origin, root-
+  // relative path is allowed (starts with a single '/', not '//' or '/\', no
+  // leading whitespace/control chars). Absolute or protocol-relative URLs
+  // (http…, //host, /\host) are rejected → '' (no navigation).
+  function bmReturnPath() {
+    var ret = __bmReq && __bmReq.return
+    if (typeof ret !== 'string') return ''
+    var c0 = ret.charCodeAt(0)
+    if (isNaN(c0) || c0 <= 32) return ''    // reject empty / leading ws/control chars
+    if (!/^\/(?![\/\\])/.test(ret)) return ''         // must be /path, not //… or /\…
+    return ret
+  }
+
+  // Stop the AR engine and free device resources: releases the camera stream,
+  // halts the render loop, and clears our helper interval. Safe to call twice.
+  window.__bookmonStopAR = function () {
+    try { if (window.__fixVideosInterval) { clearInterval(window.__fixVideosInterval); window.__fixVideosInterval = null } } catch (e) {}
+    try { if (window.XR8 && XR8.stop) XR8.stop() } catch (e) {}
+  };
+
+  // === Terminal end of the experience (success / fail / close) ===========
+  // Records the result to sessionStorage, tears the AR session down, then
+  // navigates to the return path. `graceMs` keeps rendering briefly first (so a
+  // success effect can play / a fail overlay stays visible). `payload` is unused
+  // by the contract (kept for call-site compatibility / debugging).
+  window.__bookmonEnded = false
+  window.__bookmonEnd = function (type, payload, opts) {
+    if (window.__bookmonEnded) return
+    window.__bookmonEnded = true
+    // 1) Record the result (echo the handshake nonce when present).
+    try {
+      var res = {ar: type}
+      var nonce = bmReqNonce()
+      if (nonce != null) res.nonce = nonce
+      sessionStorage.setItem('bookmon-ar-res', JSON.stringify(res))
+    } catch (e) { /* no-op */ }
+    // 2) After the grace period (once the result overlay has fully covered the
+    // screen), stop/pause the engine. We DON'T pause immediately: pausing halts
+    // the render loop and blanks the camera canvas to white — which showed
+    // through the fail vignette's transparent centre as an instant white screen.
+    // Waiting until the white overlay is up means freezing the feed is invisible.
+    var graceMs = (opts && typeof opts.graceMs === 'number')
+      ? opts.graceMs
+      : (type === 'success' ? 2500 : 0)   // success: let an effect play; else now
+    var ret = bmReturnPath()
+    function finish() {
+      if (ret) {
+        // Leaving the page → fully tear the engine down and navigate away.
+        window.__bookmonStopAR()
+        try { window.location.assign(ret) } catch (e) { /* no-op */ }
+      } else {
+        // Single-document reuse: don't stop() (hard, non-resumable). PAUSE now —
+        // the result overlay is fully up, so freezing the feed is invisible.
+        // A later __bookmonRestart calls XR8.resume() for the next game.
+        try { if (window.XR8 && XR8.pause) XR8.pause() } catch (e) { /* no-op */ }
+      }
+    }
+    if (graceMs > 0) setTimeout(finish, graceMs)
+    else finish()
+  };
+
+  // 단일 문서 재사용 — 다음 조우를 위해 종료 효과 DOM/플래그를 초기화한다(엔진은 유지).
+  //   호스트(arInject)가 재진입 시 새 req 를 쓴 뒤 이 함수 + __bookmonRestart 를 호출한다.
+  window.__bookmonResetUI = function () {
+    try {
+      window.__bookmonEnded = false
+      sessionStorage.removeItem('bookmon-ar-res')
+      var rfx = document.getElementById('result-fx'); if (rfx) { rfx.className = ''; }
+      var rw = document.getElementById('result-white'); if (rw) { rw.className = ''; }
+      var gu = document.getElementById('game-ui'); if (gu) { gu.setAttribute('data-phase', 'none'); }
+      var q = document.getElementById('quiz-ui'); if (q) { q.className = ''; q.innerHTML = ''; }
+      var cfx = document.getElementById('capture-fx'); if (cfx) cfx.remove()
+      var pc = document.getElementById('pose-center'); if (pc) pc.remove()
+      try { if (window.__bookmonUI && window.__bookmonUI.setHint) window.__bookmonUI.setHint(null) } catch (e2) {} // 이전 판 안내 문구
+      // 다음 판도 첫 판처럼 — 검은 로딩 화면으로 덮고 시작, 카메라가 다시 돌면(__bookmonRevealWhenLive) 걷는다.
+      //   ⚠ 호스트(arInject)는 이 함수를 AR 화면을 다시 보이기 "전에" 불러야 멈춰 있던 이전 판 화면이 안 비친다.
+      if (!document.getElementById('boot-overlay') && gu && gu.parentNode) {
+        var bo = document.createElement('div'); bo.id = 'boot-overlay'
+        bo.innerHTML = '<span class="loading">loading<span class="dots"></span></span>'
+        gu.parentNode.insertBefore(bo, gu.parentNode.firstChild)
+      }
+    } catch (e) { /* no-op */ }
+  };
+
+  // Content is ready: fade the white boot overlay out, then remove it — the AR
+  // content shows through, appearing to fade in from white. Called from the ECS
+  // side (hide-on-ready) when REALITY_READY fires. Idempotent.
+  window.__bookmonReady = function () {
+    var el = document.getElementById('boot-overlay')
+    if (!el || el.__done) return
+    el.__done = true
+    el.classList.add('fade-out')
+    setTimeout(function () { if (el && el.parentNode) el.parentNode.removeChild(el) }, 850)
+  };
+
+  // 다음 판(재시작) — XR8.resume() 뒤 카메라가 다시 돌고 "추적이 안정(NORMAL)"된 다음 위치 기준을 초기화(recenter)하고
+  //   검은 로딩 화면을 걷는다. (첫 판은 REALITY_READY → __bookmonWhenReady → __bookmonReady 경로.)
+  // ⚠ 수정 시 주의: resume 직후 바로 recenter 하면 추적이 아직 불안정해 카메라 위치가 튀고, 제자리 몬스터가 멀리 날아가 보였다.
+  //   순서 = 프레임 12개·0.6초 → 추적 NORMAL 0.5초 유지 → recenter → 0.3초 → 공개(몬스터 스폰은 공개 뒤 2.5초).
+  //   추적 상태를 못 받는 환경이면 2.5초 뒤, 계속 불안정하면 8초 뒤엔 그냥 진행(갇힘 방지).
+  var bmFrames = 0, bmTrack = '', bmFrameHooked = false, bmLimitedSince = 0
+  window.__bookmonTracking = function () { return bmTrack }
+  window.__bmRingR = function () { var r = document.getElementById('xh-ring'); if (!r) return 0; var b = r.getBoundingClientRect(); return b.width / 2 } // 조준 원 반지름(px) — bundle 판정 기준
+  window.__bookmonFrames = function () { return bmFrames } // 성능 표시(?perf=1)용 8th Wall 처리 프레임 수
+  // 스폰해도 되는지 — 추적이 불안정(LIMITED)하면 미루되, 4초 넘게 계속되면(흰 벽·어두운 곳 등) 그냥 진행.
+  window.__bookmonTrackOk = function () { return !!window.__bookmon3dof || bmTrack !== 'LIMITED' || (bmLimitedSince && Date.now() - bmLimitedSince > 4000) } // 3DOF(방향만 추적)는 대기 없음
+  // 추적 상태 수집 — 첫 판도 쓰도록 엔진이 로드되면 바로 등록(스폰은 추적이 LIMITED 인 동안 미룬다: bundle aiming).
+  function bmHookFrames() {
+    try {
+      if (!bmFrameHooked && window.XR8 && XR8.addCameraPipelineModule) {
+        bmFrameHooked = true
+        XR8.addCameraPipelineModule({ name: 'bookmon-frames', onUpdate: function (a) {
+          bmFrames++
+          try { var rl = a && a.processCpuResult && a.processCpuResult.reality; if (rl && rl.trackingStatus) { bmTrack = rl.trackingStatus; if (bmTrack === 'LIMITED') { if (!bmLimitedSince) bmLimitedSince = Date.now() } else bmLimitedSince = 0 } } catch (e) {}
+        } })
+      }
+    } catch (e) {}
+  }
+  if (window.XR8) bmHookFrames(); else window.addEventListener('xrloaded', bmHookFrames)
+  window.__bookmonRevealWhenLive = function () {
+    bmHookFrames()
+    var start = bmFrames, t0 = Date.now(), okSince = 0, centered = 0; bmTrack = ''
+    ;(function wait() {
+      var now = Date.now(), dt = now - t0
+      if (!centered) {
+        var live = bmFrames - start >= 12 && dt >= 600
+        if (live && (window.__bookmon3dof || bmTrack === 'NORMAL' || (!bmTrack && dt > 2500))) { if (!okSince) okSince = now } else okSince = 0
+        if ((okSince && now - okSince >= 500) || dt > 8000) {
+          try { if (window.XR8 && XR8.XrController && XR8.XrController.recenter) XR8.XrController.recenter() } catch (e) {}
+          centered = now
+        }
+      } else if (now - centered >= 300) { if (window.__bookmonReady) window.__bookmonReady(); return }
+      setTimeout(wait, 100)
+    })()
+  };
+
+  // === Asset preload gate ================================================
+  // Preload every UI image the game/quiz uses up-front, so game logic never
+  // runs against a not-yet-decoded image (which caused occasional glitches).
+  // Resolves when all are loaded OR a safety timeout elapses (never hangs).
+  // The host `image` and the monster sprite SHEETS are gated separately
+  // (bookmon-ar-req.image probe below / target-monster's __bookmonWhenSpritesReady).
+  window.__bookmonWhenAssetsReady = (function () {
+    var IMAGES = [
+      'assets/cap_white.png', 'assets/cap_green.png', 'assets/aim_ring.webp', 'assets/aim_ring_on.webp',
+      'assets/indi.png', 'assets/cam_normal.png',
+      'assets/start.png', 'assets/start_1.png', 'assets/start_2.png', 'assets/start_3.png',
+      'assets/ar_effect1.png', 'assets/ar_effect2.png', 'assets/cap_flash1.webp', 'assets/cap_flash2.webp', 'assets/cap_flash3.webp', 'assets/cap_flash4.webp',
+      'assets/quiz/quiz_frame.png', 'assets/capture_book.webp',
+      'assets/success/P_succ1.png', 'assets/success/P_succ2.png', 'assets/success/P_succ3.png',
+    ]
+    var ASSET_TIMEOUT_MS = 10000
+    var p = new Promise(function (resolve) {
+      var remaining = IMAGES.length
+      if (!remaining) { resolve(); return }
+      var done = false
+      var finish = function () { if (!done) { done = true; resolve() } }
+      var one = function () { if (--remaining <= 0) finish() }
+      IMAGES.forEach(function (src) {
+        var im = new Image()
+        im.onload = one
+        im.onerror = one   // a missing/optional asset must not block the gate
+        im.src = src
+      })
+      try { setTimeout(finish, ASSET_TIMEOUT_MS) } catch (e) { finish() }
+    })
+    return function () { return p }
+  })()
+
+  // Combined readiness: UI images + monster sprite sheets (set by target-monster
+  // once it has chroma-keyed them) + a MINIMUM loading-screen time. Both the
+  // overlay fade AND the game start wait on this, so nothing runs before its
+  // images are decoded — and the loading screen always shows for at least
+  // LOADING_MIN_MS so it never flickers away instantly on a warm cache.
+  var LOADING_MIN_MS = 1000
+  window.__bookmonWhenReady = function () {
+    var ps = []
+    try { if (window.__bookmonWhenAssetsReady) ps.push(window.__bookmonWhenAssetsReady()) } catch (e) {}
+    try { if (window.__bookmonWhenSpritesReady) ps.push(window.__bookmonWhenSpritesReady()) } catch (e) {}
+    ps.push(new Promise(function (r) { try { setTimeout(r, LOADING_MIN_MS) } catch (e) { r() } }))
+    return Promise.all(ps).catch(function () {})
+  };
+
+  // If the host-supplied image (bookmon-ar-req.image) fails to load, end early as
+  // a failure. Empty/absent image → nothing to probe (the bundled fallback is used).
+  ;(function () {
+    try {
+      var imgSrc = __bmReq && typeof __bmReq.image === 'string' ? __bmReq.image : ''
+      if (imgSrc) {
+        var probe = new Image()
+        probe.onerror = function () {
+          window.__bookmonEnd('fail', {reason: 'image_load_failed', image: imgSrc})
+        }
+        probe.src = imgSrc
+      }
+    } catch (e2) { /* no-op */ }
+  })()
+
+  // Show the desktop guidance when this isn't a touch/mobile device (world AR is
+  // disabled on desktop by the camera config). On mobile, arm a safety fallback so
+  // a missed REALITY_READY never traps the user on the white loading screen.
+  ;(function () {
+    var isMobile = /Android|iPhone|iPad|iPod/i.test(navigator.userAgent) ||
+      (('ontouchstart' in window) && navigator.maxTouchPoints > 1)
+    if (!isMobile) {
+      var hint = document.querySelector('#boot-overlay .desktop-hint')
+      if (hint) hint.style.display = 'block'
+    } else {
+      // 15s→45s: 느린 네트워크 첫 실행에서 AR 이 준비되기 전에 흰 화면이 걷혀 뒤의 지도가 드러나던 문제.
+      // 정상 경로는 REALITY_READY→__bookmonWhenReady 로 걷히고, 이건 준비 신호를 놓쳤을 때만의 탈출구.
+      setTimeout(function () { if (window.__bookmonReady) window.__bookmonReady() }, 45000)
+    }
+  })()
+
+  // Shot effect: muzzle flash + camera shake. Called from the game (shooting-game.ts)
+  // on every shot; `strong` = a confirmed hit (bigger shake). The flash keeps its
+  // CSS muzzle-flash gradient — we only (re)trigger the animation.
+  window.__shotFx = function (color, strong) {
+    window.__shotCount = (window.__shotCount || 0) + 1
+    var fl = document.getElementById('shot-flash')
+    if (fl) {
+      fl.classList.remove('fire')
+      void fl.offsetWidth          // force reflow so the animation retriggers
+      fl.classList.add('fire')
+    }
+    var c = document.querySelector('canvas')
+    if (c) {
+      var cls = strong ? 'cam-shake-strong' : 'cam-shake'
+      c.classList.remove('cam-shake')
+      c.classList.remove('cam-shake-strong')
+      void c.offsetWidth
+      c.classList.add(cls)
+    }
+  }
+
+  // === Game UI controller ================================================
+  // Drives the HTML crosshairs, intro animation, and the capture mini-game.
+  // Called by the game (shooting-game.ts):
+  //   __bookmonUI.setPhase('kill'|'aim'|'capture'|'none')
+  //   __bookmonUI.setLock(bool)          // recolor current reticle (green when aimed)
+  //   __bookmonUI.fireDiscovery(x, y)    // ar_effect1/2 burst at the monster (x/y = % of viewport)
+  //   __bookmonUI.moveDiscovery(x, y)    // keep the burst on the monster while it moves
+  //   __bookmonUI.showCount(text) / hideCount()  // 3·2·1 countdown
+  //   __bookmonUI.playStartBanner()      // start banner (start.png "Go")
+  //   __bookmonUI.setZone(frac)          // capture-zone width (shrinks per catch)
+  //   __bookmonUI.setCaptureProgress(done,needed)  // progress dots
+  //   __bookmonUI.cameraShutter()        // "찰칵" flash on a successful catch
+  //   __bookmonUI.startCapture({seconds, zone, onCapture, onTimeout})
+  //     arrow sweeps the gauge; onCapture fires when pressed with the arrow in
+  //     the zone AND the monster aimed — repeatable; onTimeout when time runs out
+  //   __bookmonUI.stopCapture()
+  window.__bookmonUI = (function () {
+    var ui = document.getElementById('game-ui')
+    var xhKill = document.getElementById('xh-kill')
+    var xhCap = document.getElementById('xh-cap')
+    var capCenter = document.getElementById('xh-cap-center')
+    var secsEl = document.getElementById('cap-secs')
+    var zoneEl = document.getElementById('cap-zone')
+    var indiEl = document.getElementById('cap-indi')
+    var camBtn = document.getElementById('cap-camera')
+    var camImg = camBtn ? camBtn.querySelector('img') : null
+    var discoverFx = document.getElementById('discover-fx')
+    var countdown = document.getElementById('countdown')
+    var countdownImg = document.getElementById('countdown-img')
+    var startBanner = document.getElementById('start-banner')
+    var progress = document.getElementById('cap-progress')
+
+    var phase = 'none'
+    var locked = false
+    var raf = null
+    var cap = null                        // active capture session
+
+    function now() { return (window.performance && performance.now) ? performance.now() : (+new Date()) }
+
+    // 조준 단계 안내 문구(null = 숨김). 같은 문구면 그대로 둔다(bundle 이 매 틱 호출).
+    var hintEl = document.getElementById('aim-hint'), hintText = null
+    function setHint(t) {
+      t = t || null
+      if (t === hintText || !hintEl) return
+      hintText = t
+      if (t) hintEl.textContent = t
+      hintEl.classList.toggle('show', !!t)
+    }
+    function setPhase(p) {
+      // 사진 찍는 단계(capture)에선 촬영 방법 안내. 조준(aim) 문구는 bundle 이 매 틱 정한다.
+      if (p !== 'aim') setHint(p === 'capture' ? '북몬이 원 안에 있을 때 카메라 버튼을 눌러주세요' : null)
+      if (p === 'aim' && ui) ui.classList.remove('found') // 새 판 — 다시 '찾기 전' 모습
+      phase = p
+      if (ui) ui.setAttribute('data-phase', p)
+      setLock(false)
+      if (p !== 'capture') stopCapture()
+    }
+    function setLock(v) {
+      locked = !!v
+      if (phase === 'kill' && xhKill) {
+        xhKill.src = locked ? 'assets/kill_green.png' : 'assets/kill_white.png'
+      }
+      var ringEl = document.getElementById('xh-ring'); if (ringEl) ringEl.classList.toggle('locked', locked && (phase === 'capture' || phase === 'aim'))
+      if ((phase === 'capture' || phase === 'aim') && capCenter) {
+        capCenter.src = locked ? 'assets/cap_green.png' : 'assets/cap_white.png'
+      }
+    }
+
+    // ---- Intro helpers --------------------------------------------------
+    // Discovery burst — camera-centered, big. Alternates two burst frames
+    // (ar_effect1/ar_effect2) rapidly for a lively, flickering "발견!" pop.
+    var DISCOVER_FRAMES = ['assets/ar_effect1.png', 'assets/ar_effect2.png']
+    var discoverTimer = null
+    // Preload both frames so the rapid swap never flickers on first play.
+    DISCOVER_FRAMES.forEach(function (s) { var im = new Image(); im.src = s })
+    // Put the burst on the monster (x/y = % of the viewport). Invalid → screen center.
+    function placeDiscovery(x, y) {
+      if (!discoverFx) return
+      var ok = typeof x === 'number' && isFinite(x) && typeof y === 'number' && isFinite(y)
+      discoverFx.style.left = (ok ? x : 50) + '%'
+      discoverFx.style.top = (ok ? y : 50) + '%'
+    }
+    function moveDiscovery(x, y) {
+      if (typeof x === 'number' && isFinite(x) && typeof y === 'number' && isFinite(y)) placeDiscovery(x, y)
+    }
+    function fireDiscovery(x, y) {
+      if (ui) ui.classList.add('found') // 찾음 → 사각 프레임 표시·조준선 원래 크기
+      if (!discoverFx) return
+      placeDiscovery(x, y)
+      if (discoverTimer) { clearInterval(discoverTimer); discoverTimer = null }
+      var i = 0
+      discoverFx.src = DISCOVER_FRAMES[0]
+      discoverFx.classList.remove('play')
+      void discoverFx.offsetWidth
+      discoverFx.classList.add('play')
+      // Toggle between the two burst frames while the grow/rotate/fade plays.
+      discoverTimer = setInterval(function () {
+        i = (i + 1) % DISCOVER_FRAMES.length
+        discoverFx.src = DISCOVER_FRAMES[i]
+      }, 90)
+      setTimeout(function () {
+        if (discoverTimer) { clearInterval(discoverTimer); discoverTimer = null }
+      }, 950)   // match the #discover-fx.play animation duration
+    }
+    function showCount(txt) {
+      if (!countdown || !countdownImg) return
+      // txt is '3' | '2' | '1' → the matching countdown banner image.
+      countdownImg.src = 'assets/start_' + txt + '.png'
+      // Per-digit optical-centering class (n1/n2/n3) → CSS --cd-shift.
+      countdown.classList.remove('n1', 'n2', 'n3')
+      countdown.classList.add('n' + txt)
+      countdown.classList.add('show')
+      // Restart the pop animation for each number.
+      countdownImg.style.animation = 'none'
+      void countdownImg.offsetWidth
+      countdownImg.style.animation = ''
+    }
+    function hideCount() { if (countdown) countdown.classList.remove('show') }
+    function playStartBanner() {
+      if (!startBanner) return
+      startBanner.classList.remove('play')
+      void startBanner.offsetWidth
+      startBanner.classList.add('play')
+    }
+
+    // ---- Capture zone + progress + shutter ------------------------------
+    // Size the dark-green CAPTURE ZONE (frac of the bar width, 0..1), centered.
+    // Called with a smaller frac after every catch — the shrink animates via the
+    // CSS transition and pulses bright so the difficulty step reads clearly.
+    var zoneFrac = 0.34
+    function setZone(frac) {
+      var f = frac < 0.02 ? 0.02 : (frac > 1 ? 1 : frac)
+      zoneFrac = f
+      if (!zoneEl) return
+      zoneEl.style.width = (f * 100) + '%'
+      zoneEl.style.left = ((1 - f) * 50) + '%'
+      zoneEl.classList.remove('shrink')
+      void zoneEl.offsetWidth
+      zoneEl.classList.add('shrink')
+    }
+    function setCaptureProgress(done, needed) {
+      if (!progress) return
+      needed = needed || 0
+      if (progress.childElementCount !== needed) {
+        progress.innerHTML = ''
+        for (var i = 0; i < needed; i++) {
+          var d = document.createElement('span'); d.className = 'dot'; progress.appendChild(d)
+        }
+      }
+      var dots = progress.querySelectorAll('.dot')
+      for (var j = 0; j < dots.length; j++) {
+        if (j < done) dots[j].classList.add('done'); else dots[j].classList.remove('done')
+      }
+    }
+    // Synthesized mechanical shutter "click-clack" (Web Audio, no asset needed).
+    // Two short filtered-noise transients: mirror-up snap then curtain clack.
+    var __audioCtx = null
+    function shutterSound() {
+      try {
+        var AC = window.AudioContext || window.webkitAudioContext
+        if (!AC) return
+        if (!__audioCtx) __audioCtx = new AC()
+        if (__audioCtx.state === 'suspended' && __audioCtx.resume) __audioCtx.resume()
+        var ctx = __audioCtx
+        var t0 = ctx.currentTime
+        var sr = ctx.sampleRate
+        var clack = function (at, dur, freq, q, gainv) {
+          var n = Math.max(1, Math.floor(sr * dur))
+          var buf = ctx.createBuffer(1, n, sr)
+          var d = buf.getChannelData(0)
+          for (var i = 0; i < n; i++) {
+            var env = Math.pow(1 - i / n, 2.5)          // fast decay → sharp click
+            d[i] = (Math.random() * 2 - 1) * env
+          }
+          var src = ctx.createBufferSource(); src.buffer = buf
+          var bp = ctx.createBiquadFilter(); bp.type = 'bandpass'; bp.frequency.value = freq; bp.Q.value = q
+          var g = ctx.createGain(); g.gain.value = gainv
+          src.connect(bp); bp.connect(g); g.connect(ctx.destination)
+          src.start(at); src.stop(at + dur)
+        }
+        clack(t0, 0.028, 3200, 1.2, 0.55)          // sharp mirror-up snap
+        clack(t0 + 0.052, 0.05, 1400, 0.9, 0.45)   // lower curtain clack
+      } catch (e) { /* no-op */ }
+    }
+
+    // 캡처 효과 — 받은 투명 영상 '플래시 3'(25fps 8프레임: 빈 칸 · 반짝 1·2 · 빈 칸 2 · 반짝 3·4 · 빈 칸)을 프레임 그대로 전체 화면에.
+    //   맨 앞 빈 칸은 뺐다(누르자마자 반짝이게 — 이전 효과 때 사용자 결정). 반짝임이 없는 칸은 배경 없음 = 카메라 화면 그대로.
+    //   ⚠ 수정 시 주의: 반짝임 이미지는 __bookmonWhenAssetsReady 에서 미리 받아 둔다(첫 사진에서 빈 화면 방지) — 파일을 바꾸면 거기도 같이.
+    var CAP_FLASH = [['assets/cap_flash1.webp', 0], ['assets/cap_flash2.webp', 40], [null, 80], ['assets/cap_flash3.webp', 160], ['assets/cap_flash4.webp', 200], [null, 240]]
+    function playCaptureFlash() {
+      var el = document.getElementById('shutter-flash'); if (!el) return
+      ;(el._t || []).forEach(clearTimeout)
+      el.style.opacity = '1'
+      var show = function (src) { el.style.backgroundImage = src ? 'url(' + src + ')' : 'none' }
+      show(CAP_FLASH[0][0])   // 첫 프레임은 바로
+      el._t = CAP_FLASH.slice(1).map(function (k) { return setTimeout(function () { show(k[0]) }, k[1]) })
+    }
+
+    // "찰칵" = 캡처 효과(영상) + 조준 원 튐 + 셔터 소리 + 2단 진동.
+    function cameraShutter() {
+      var replay = function (el) { if (el) { el.classList.remove('snap'); void el.offsetWidth; el.classList.add('snap') } }
+      playCaptureFlash()
+      replay(xhCap)
+      shutterSound()
+      // Haptic click-clack (mobile) — mirrors the two-stage shutter. Best-effort.
+      try { if (navigator.vibrate) navigator.vibrate([18, 34, 26]) } catch (e) { /* no-op */ }
+    }
+
+    // End-of-game screen effect:
+    //   'success' → the screen gradually fills with white
+    //   'fail'    → a red flash → dark red vignette HOLDS ~2.5s → white fades in
+    //               over the vignette, ending on a clean white screen.
+    var failWhiteTimer = null
+    function showResult(type) {
+      var el = document.getElementById('result-fx')
+      var white = document.getElementById('result-white')
+      if (!el) return
+      el.classList.remove('win', 'lose')
+      if (white) white.classList.remove('show')
+      if (failWhiteTimer) { clearTimeout(failWhiteTimer); failWhiteTimer = null }
+      void el.offsetWidth
+      el.classList.add(type === 'success' ? 'win' : 'lose')
+      if (type !== 'success' && white) {
+        // Let the red vignette read for a beat, then fade white in over it.
+        failWhiteTimer = setTimeout(function () { white.classList.add('show') }, 2500)
+      }
+    }
+
+    // Capture session = a single TIME countdown. The dark-green fill and the
+    // seconds readout deplete together. Pressing the shutter while the monster is
+    // locked on takes a "photo" (onCapture) — repeatable until onTimeout at 0.
+    function startCapture(opts) {
+      stopCapture()
+      opts = opts || {}
+      setZone((opts.zone != null) ? opts.zone : zoneFrac)
+      var seconds = opts.seconds || 10
+      // ⚠ 체험모드(untimed): 남은 초 표시를 숨기고 시간 초과로 끝나지 않는다. 행사모드는 opts.seconds(30초).
+      var untimed = !!(window.__bookmonUntimed && window.__bookmonUntimed())
+      var tEl = secsEl && secsEl.parentNode; if (tEl) tEl.style.display = untimed ? 'none' : ''
+      var t0 = now(), endAt = t0 + seconds * 1000
+      if (secsEl) secsEl.textContent = seconds
+      // Random per-sweep duration (ms for one end-to-end pass); re-rolled at each
+      // turnaround so the arrow's speed varies — sometimes fast, sometimes slow.
+      var minSweep = (opts.minSweepMs != null) ? opts.minSweepMs : 900
+      var maxSweep = (opts.maxSweepMs != null) ? opts.maxSweepMs : 3000
+      var randSweep = function () { return minSweep + Math.random() * (maxSweep - minSweep) }
+      cap = {
+        done: false, endAt: endAt,
+        frac: 0.04, pos: 0, dir: 1, sweepMs: randSweep(), lastT: t0,
+        onCapture: opts.onCapture, onTimeout: opts.onTimeout,
+      }
+
+      function tick() {
+        if (!cap || cap.done) return
+        var t = now()
+        var dt = t - cap.lastT
+        cap.lastT = t
+        // Advance the arrow; reflect at the ends and re-roll the speed there.
+        cap.pos += (dt / cap.sweepMs) * cap.dir
+        var guard = 0
+        while ((cap.pos < 0 || cap.pos > 1) && guard++ < 8) {
+          if (cap.pos > 1) { cap.pos = 2 - cap.pos; cap.dir = -1 } else { cap.pos = -cap.pos; cap.dir = 1 }
+          cap.sweepMs = randSweep()
+        }
+        if (cap.pos < 0) cap.pos = 0
+        if (cap.pos > 1) cap.pos = 1
+        // Ease the reversals (60% smoothstep blend) so turnarounds feel smooth.
+        var s = cap.pos * cap.pos * (3 - 2 * cap.pos)
+        var eased = cap.pos + (s - cap.pos) * 0.6
+        var frac = 0.04 + eased * 0.92             // travel 4%..96%
+        cap.frac = frac
+        if (indiEl) indiEl.style.left = (frac * 100) + '%'
+        // Time limit readout (the bar itself no longer shows time).
+        var remain = Math.max(0, Math.ceil((endAt - t) / 1000))
+        if (!untimed && secsEl) secsEl.textContent = remain
+        if (!untimed && t >= endAt) {
+          var cb = cap.onTimeout; cap.done = true; cap = null
+          if (cb) cb()
+          return
+        }
+        raf = requestAnimationFrame(tick)
+      }
+      raf = requestAnimationFrame(tick)
+    }
+    function stopCapture() {
+      if (raf) { cancelAnimationFrame(raf); raf = null }
+      cap = null
+    }
+    // Shutter press: a "photo" counts when the sweeping arrow is INSIDE the dark
+    // green capture zone AND the monster is locked on. It does NOT end the
+    // session — the caller counts captures (shrinking the zone each time) and
+    // calls stopCapture() when enough are taken. A miss just flashes red.
+    // Shutter cooldown (ms): after a SUCCESSFUL capture the button is inert for
+    // this long — the monster holds its pose during it — so rapid tapping can't
+    // fire multiple captures at once.
+    var CAPTURE_COOLDOWN_MS = 2000
+    var captureCooldownUntil = 0
+    function tryCapture() {
+      if (!cap || cap.done) return
+      if (now() < captureCooldownUntil) return   // still cooling down → ignore
+      var inZone = Math.abs(cap.frac - 0.5) <= zoneFrac / 2
+      if (inZone && locked) {
+        captureCooldownUntil = now() + CAPTURE_COOLDOWN_MS
+        if (camBtn) {
+          camBtn.classList.add('cooldown')
+          setTimeout(function () { if (camBtn) camBtn.classList.remove('cooldown') }, CAPTURE_COOLDOWN_MS)
+        }
+        if (cap.onCapture) cap.onCapture()
+      } else {
+        if (indiEl) { indiEl.classList.remove('miss'); void indiEl.offsetWidth; indiEl.classList.add('miss') }
+        if (xhCap) { xhCap.classList.remove('miss'); void xhCap.offsetWidth; xhCap.classList.add('miss') }
+      }
+    }
+
+    if (camBtn) {
+      // Press feedback via a CSS class (cam_press.png removed).
+      var press = function () { camBtn.classList.add('pressing') }
+      var release = function () { camBtn.classList.remove('pressing') }
+      camBtn.addEventListener('pointerdown', press)
+      camBtn.addEventListener('pointerup', release)
+      camBtn.addEventListener('pointerleave', release)
+      camBtn.addEventListener('pointercancel', release)
+      camBtn.addEventListener('click', function (e) { e.stopPropagation(); tryCapture() })
+    }
+
+    // ===== 포획 연출 — bundle(winpose) 이 부른다: playCaptureFx(x%, y%, 반높이%, 몬스터 그림, onAbsorb) → Promise(끝나면 퀴즈).
+    //   책이 발밑에 뜨고(0.3s) 펼쳐지며(0.6s) 빛 기둥 → 몬스터 복제 그림이 곧장 책으로 빨려 들어감(0.95s) → 반짝 → 닫힘.
+    //   ⚠ 수정 시 주의: onAbsorb 는 3D 몬스터를 숨기는 콜백(복제 그림이 날기 시작할 때 1번). 안 부르면 몬스터가 둘로 보인다.
+    var CF = { src: 'assets/capture_book.webp', n: 14, fw: 600, fh: 467, hx: .501, hy: .669 }
+    // 빛 기둥 시트: 프레임 n장(cols×rows), 초당 fps. cx·base = 한 프레임에서 빛 기둥 밑동의 가로·세로 위치(0~1) — 책 가운데에 맞춘다.
+    var CR = { src: 'assets/capture_rays.webp', n: 24, cols: 6, rows: 4, fps: 12, cx: .52, base: .916 }
+    try { (new Image()).src = CF.src; (new Image()).src = CR.src } catch (e) {}
+    function cfMonsterCanvas(img, h) {
+      var c = document.createElement('canvas')
+      function paint(im) { var w = im.naturalWidth || im.width, hh = im.naturalHeight || im.height; if (!w || !hh) return false
+        c.width = w; c.height = hh; c.getContext('2d').drawImage(im, 0, 0); c.style.height = h + 'px'; c.style.width = (h * w / hh) + 'px'; return true }
+      var ok = false; try { ok = !!img && paint(img) } catch (e) {}
+      if (!ok) { try { var req = JSON.parse(sessionStorage.getItem('bookmon-ar-req') || '{}'); if (req.image) { var im = new Image(); im.onload = function () { paint(im) }; im.src = req.image } } catch (e) {} }
+      if (!c.style.height) { c.style.height = h + 'px'; c.style.width = (h * .55) + 'px' }
+      return c
+    }
+    // 그림의 불투명 영역(가로 중심·아래 끝, 0~1). 못 읽으면(교차 출처 이미지 등) 가운데·맨 아래.
+    function cfBBox(c) {
+      try { var w = c.width, h = c.height; if (!w || !h) throw 0
+        var d = c.getContext('2d').getImageData(0, 0, w, h).data, x0 = w, x1 = -1, y0 = h, y1 = -1
+        for (var y = 0; y < h; y += 2) for (var x = 0; x < w; x += 2) if (d[(y * w + x) * 4 + 3] > 40) { if (x < x0) x0 = x; if (x > x1) x1 = x; if (y < y0) y0 = y; if (y > y1) y1 = y }
+        if (x1 < 0) throw 0
+        return { cx: (x0 + x1) / 2 / w, cy: (y0 + y1) / 2 / h, bottom: (y1 + 1) / h }
+      } catch (e) { return { cx: .5, cy: .5, bottom: 1 } }
+    }
+    // 포즈 — bundle(winpose) 이 3D 북몬을 숨긴 뒤 부른다. 화면 가운데에 포즈 그림을 크게 띄운다.
+    //   ⚠ 수정 시 주의: 정답이면 playCaptureFx 가 이 그림을 그대로 빨아들이고(위치·크기·그림을 여기서 가져감), 오답이면 퀴즈 finish 가 지운다.
+    //     새 판 시작 때는 __bookmonResetUI 가 지운다. 셋 중 하나라도 빠지면 가운데 그림이 화면에 남는다.
+    var POSE_SRC = 'assets/success/P_succ1.png'
+    try { (new Image()).src = POSE_SRC } catch (e) {}
+    function showPose() {
+      var old = document.getElementById('pose-center'); if (old) old.remove()
+      var im = document.createElement('img'); im.id = 'pose-center'; im.alt = ''; im.src = POSE_SRC
+      ;((ui && ui.parentNode) || document.body).appendChild(im)
+      try { im.animate([{ transform: 'translate(-50%,-50%) scale(.4)', opacity: 0 }, { transform: 'translate(-50%,-50%) scale(1.08)', opacity: 1, offset: .65 }, { transform: 'translate(-50%,-50%) scale(1)', opacity: 1 }], { duration: 380, easing: 'cubic-bezier(.3,1.4,.5,1)' }) } catch (e) {}
+    }
+    function hasPose() { return !!document.getElementById('pose-center') }
+    // 책 연출 효과음 — 받은 소리(책연출효과음.wav) 앞 2.8초, 끝 0.5초 서서히 줄임. 연출 시작과 같이 튼다.
+    //   ⚠ 수정 시 주의: 퀴즈 답을 누르고 0.25초 뒤에 불려 사용자 탭 밖이라 iOS 는 <audio> 재생을 막는다 →
+    //     사진 찍을 때 셔터 소리(shutterSound)가 탭 안에서 연 AudioContext(__audioCtx)로 튼다. 파일은 미리 받아 두고 처음 틀 때 해독.
+    var BOOK_SFX = 'assets/sfx_book.mp3', bookSfxData = null, bookSfxBuf = null
+    try { fetch(BOOK_SFX).then(function (r) { return r.arrayBuffer() }).then(function (b) { bookSfxData = b }).catch(function () {}) } catch (e) {}
+    function playBookSfx() {
+      try {
+        var AC = window.AudioContext || window.webkitAudioContext
+        if (!AC || !bookSfxData) return
+        if (!__audioCtx) __audioCtx = new AC()
+        if (__audioCtx.state === 'suspended' && __audioCtx.resume) __audioCtx.resume()
+        var ctx = __audioCtx
+        var play = function (buf) { bookSfxBuf = buf; var src = ctx.createBufferSource(); src.buffer = buf; src.connect(ctx.destination); src.start(0) }
+        if (bookSfxBuf) play(bookSfxBuf)
+        else ctx.decodeAudioData(bookSfxData.slice(0), play, function () {})   // 콜백 형식 — 구형 webkitAudioContext 는 Promise 를 안 돌려준다
+      } catch (e) { /* no-op */ }
+    }
+    function playCaptureFx(xp, yp, halfHp, monImg, onAbsorb) {
+      return new Promise(function (resolve) {
+        playBookSfx()
+        var W = window.innerWidth, H = window.innerHeight, S = Math.min(W, H)
+        var mx = (isFinite(xp) ? xp : 50) / 100 * W, my = (isFinite(yp) ? yp : 45) / 100 * H
+        var mh = Math.max(60, Math.min(H * .85, (isFinite(halfHp) && halfHp > 0 ? halfHp * 2 : 40) / 100 * H))
+        // 가운데 포즈가 떠 있으면 그 그림을 그 자리·크기 그대로 빨아들인다.
+        var pose = document.getElementById('pose-center')
+        if (pose) { var pr = pose.getBoundingClientRect(); mx = pr.left + pr.width / 2; my = pr.top + pr.height / 2; mh = pr.height; monImg = pose }
+        var bw = S * .72, bh = bw * CF.fh / CF.fw // 책 크기: 화면 짧은 변 기준 고정(북몬 크기·거리와 무관)
+        // ⚠ 수정 시 주의: 책은 북몬 위치가 아니라 "화면 기준 고정 위치"(하단 가운데)에 놓는다 — 북몬 발밑에 두면 AR 추적 상태·
+        //   포획 순간 북몬 위치에 따라 책 위치·크기가 매번 달라졌다. 북몬(복제 그림)은 제 위치(vx·cy0: 실제 그림 중심)에서 이 책으로 빨려 들어간다.
+        var mon = cfMonsterCanvas(monImg, mh), mw = parseFloat(mon.style.width) || mh * .55, bb = cfBBox(mon)
+        var vx = mx + (bb.cx - .5) * mw, feet = my - mh / 2 + bb.bottom * mh
+        var hx = W / 2, hy = H - bh * (1 - CF.hy) - Math.max(12, H * .04) // 책등 = 화면 가로 가운데, 책 아래 끝이 화면 바닥에서 조금 위
+        var old = document.getElementById('capture-fx'); if (old) old.remove()
+        var root = document.createElement('div'); root.id = 'capture-fx'
+        function el(cls, css) { var d = document.createElement('div'); d.className = cls; for (var k in css) d.style[k] = css[k]; root.appendChild(d); return d }
+        var book = el('cf-book', { left: (hx - bw * CF.hx) + 'px', top: (hy - bh * CF.hy) + 'px', width: bw + 'px', height: bh + 'px', backgroundImage: 'url(' + CF.src + ')', backgroundPositionX: '0%' })
+        // 빛 기둥은 책 위(앞)에 — 밑동의 밝은 원이 펼친 책장 가운데(책등 점 hy 조금 위)에 오게. 책 뒤에 두면 책장이 밑동을 가려 책 뒤에서 솟는 것처럼 보였다.
+        var RW = bw * 2, rays = el('cf-rays', { left: (hx - RW * CR.cx) + 'px', top: (hy - bh * .05 - RW * CR.base) + 'px', width: RW + 'px', height: RW + 'px', backgroundImage: 'url(' + CR.src + ')', backgroundPosition: '0% 0%' })
+        var flash = el('cf-flash', { left: hx + 'px', top: (hy - bh * .2) + 'px' })
+        // ⚠ 수정 시 주의: 게임 UI 와 같은 부모(앱 주입 시 AR 컨테이너) 안에 붙인다. body 에 붙이면 AR 카메라 캔버스(z 매우 큼) 뒤로 가려 안 보인다.
+        ;((ui && ui.parentNode) || document.body).appendChild(root)
+        function frame(k) { book.style.backgroundPositionX = (Math.max(0, Math.min(CF.n - 1, k)) / (CF.n - 1) * 100) + '%' }
+        function run(from, to, dur) { var t0 = now(); (function step() { var p = Math.min(1, (now() - t0) / dur)
+          frame(Math.round(from + (to - from) * p)); if (p < 1) requestAnimationFrame(step) })() }
+        function A(node, kf, opt) { try { return node.animate(kf, opt) } catch (e) { return null } }
+        A(book, [{ transform: 'scale(.15)', opacity: 0 }, { transform: 'scale(1.08)', opacity: 1, offset: .7 }, { transform: 'scale(1)', opacity: 1 }], { duration: 300, easing: 'cubic-bezier(.3,1.4,.5,1)', fill: 'forwards' })
+        setTimeout(function () { run(0, CF.n - 1, 600) }, 250)
+        setTimeout(function () { // 빛 기둥: 책이 펼쳐지는 중에 켜서 시트를 한 번 재생(마지막 프레임에서 멈춤)
+          rays.classList.add('on'); var r0 = now()
+          ;(function tick() { var k = Math.min(CR.n - 1, Math.floor((now() - r0) / 1000 * CR.fps))
+            rays.style.backgroundPosition = (k % CR.cols / (CR.cols - 1) * 100) + '% ' + (Math.floor(k / CR.cols) / (CR.rows - 1) * 100) + '%'
+            if (k < CR.n - 1 && root.parentNode) requestAnimationFrame(tick) })()
+        }, 450)
+        setTimeout(function () {
+          mon.style.position = 'absolute'; mon.style.left = (mx - mw / 2) + 'px'; mon.style.top = (my - mh / 2) + 'px'
+          root.insertBefore(mon, flash)
+          if (pose) pose.remove() // 가운데 포즈 → 복제 그림으로 교체(같은 자리·크기)
+          try { onAbsorb && onAbsorb() } catch (e) {}
+          // 책으로 곧장 들어감 — 휘감는 나선 없이(회의 결정) 살짝 부풀었다가(예비 동작 15%) 점점 빨라지며 책등 위(tx,ty)로
+          //   작아지며 빨려 든다. 매 프레임 계산(키프레임 X). 빛 기둥은 cf-rays 가 맡는다. 950ms.
+          var cy0 = my - mh / 2 + bb.cy * mh, tx = hx, ty = hy - bh * .18, T0 = now(), DUR = 950
+          mon.style.transformOrigin = (bb.cx * 100) + '% ' + (bb.cy * 100) + '%'
+          ;(function suck() {
+            var p = Math.min(1, (now() - T0) / DUR), lift = Math.min(1, p / .15), q = Math.max(0, (p - .15) / .85)
+            var e = q * q * (2.2 - 1.2 * q)                     // 0→1, 출발 느리고 끝으로 갈수록 빠름(단조 증가)
+            var px = (tx - vx) * e, py = (ty - cy0) * e - Math.sin(lift * Math.PI) * mh * .04 * (1 - e)
+            var sc = (1 + .08 * Math.sin(lift * Math.PI / 2)) * (1 - .96 * e)
+            mon.style.transform = 'translate(' + px.toFixed(2) + 'px,' + py.toFixed(2) + 'px) scale(' + sc.toFixed(4) + ')'
+            mon.style.filter = 'brightness(' + (1 + 2.2 * e).toFixed(2) + ')'
+            mon.style.opacity = p > .82 ? String(1 - (p - .82) / .18) : '1'
+            if (p < 1) requestAnimationFrame(suck)
+          })()
+        }, 700)
+        setTimeout(function () {
+          A(flash, [{ transform: 'translate(-50%,-50%) scale(0)', opacity: 1 }, { transform: 'translate(-50%,-50%) scale(' + (bw / 7) + ')', opacity: 0 }], { duration: 520, easing: 'ease-out', fill: 'forwards' })
+          for (var s = 0; s < 16; s++) { var a = s / 16 * Math.PI * 2, dist = bw * (.35 + (s % 3) * .12)
+            var sp = el('cf-spark', { left: hx + 'px', top: (hy - bh * .2) + 'px' })
+            A(sp, [{ transform: 'translate(0,0) scale(1)', opacity: 1 }, { transform: 'translate(' + Math.cos(a) * dist + 'px,' + (Math.sin(a) * dist * .6 - bw * .1) + 'px) scale(.2)', opacity: 0 }], { duration: 700, easing: 'cubic-bezier(.2,.8,.4,1)', fill: 'forwards' }) }
+          rays.classList.remove('on')
+        }, 1650)
+        setTimeout(function () { run(CF.n - 1, 0, 360) }, 1900)
+        setTimeout(function () { A(book, [{ transform: 'scale(1)', opacity: 1 }, { transform: 'scale(.6) translateY(10%)', opacity: 0 }], { duration: 280, easing: 'ease-in', fill: 'forwards' }) }, 2320)
+        setTimeout(function () { root.remove(); resolve() }, 2650)
+      })
+    }
+
+    return {
+      setPhase: setPhase, setLock: setLock, setHint: setHint, playCaptureFx: playCaptureFx, showPose: showPose, hasPose: hasPose,
+      fireDiscovery: fireDiscovery, moveDiscovery: moveDiscovery, showCount: showCount, hideCount: hideCount,
+      playStartBanner: playStartBanner, setZone: setZone,
+      setCaptureProgress: setCaptureProgress, cameraShutter: cameraShutter, showResult: showResult,
+      startCapture: startCapture, stopCapture: stopCapture,
+    }
+  })()</script><div id="quiz-ui" aria-hidden="true"></div><script>// === 퀴즈 컨트롤러 (front QuizLayer 충실 포팅) =================================
+//   window.__bookmonQuiz.show(quiz) → Promise<'correct'|'wrong'|'timeout'>.
+//   shooting-game 의 'quiz' 상태가 포획 성공 직후 호출 → 결과로 성공/실패 종료.
+//   quiz = { content, type('CHOICE'|'OX'), choice1..4, answer(1-based), description, title }
+;(function () {
+  var DUR = 30000, HOLD = 1200; // 퀴즈 제한 시간 30초(행사모드). 체험모드(untimed)는 무제한
+  var root = document.getElementById('quiz-ui');
+  function qFont(len){ if(len>110)return['2.4cqw','1.5']; if(len>75)return['3cqw','1.6']; return['3.525cqw','1.95']; } // 지문 글자 = 레퍼런스 비율의 1.5배(0930 수정문구). 넘치면 그린 뒤 줄인다(아래 root.appendChild 다음)
+  // 문항 속 빈칸(___ 2개 이상, ( ), [ ])은 레퍼런스처럼 네모 칸으로 그린다(텍스트는 textContent 로만 넣음).
+  function fillQuestion(p, text){ String(text).split(/(_{2,}|\(\s*\)|\[\s*\])/).forEach(function(part, i){
+    if(i%2===1){ var s=document.createElement('span'); s.className='q-blank'; p.appendChild(s); } else if(part){ p.appendChild(document.createTextNode(part)); } }); }
+  function oxBtn(mark,color,label,onClick){
+    var b=document.createElement('button'); b.type='button'; b.className='q-oxbtn';
+    b.style.borderColor=color; b.style.color=color; b.setAttribute('aria-label',label||mark);
+    b.innerHTML = mark==='O'
+      ? '<svg viewBox="0 0 100 100" fill="none" stroke="currentColor" stroke-width="15" stroke-linecap="round"><circle cx="50" cy="50" r="31"/></svg>'
+      : '<svg viewBox="0 0 100 100" fill="none" stroke="currentColor" stroke-width="16" stroke-linecap="round"><line x1="30" y1="30" x2="70" y2="70"/><line x1="70" y1="30" x2="30" y2="70"/></svg>';
+    b.addEventListener('click', onClick);
+    return b;
+  }
+  function confetti(){
+    var COLORS=['#ff4b37','#3780ff','#ffdd32','#2ec76a','#ff8fc7','#8b5cf6'], N=16;
+    var w=document.createElement('div'); w.className='q-confetti';
+    for(var i=0;i<N;i++){ var a=(i/N)*Math.PI*2, d=70+(i%4)*22; var s=document.createElement('span');
+      s.style.background=COLORS[i%COLORS.length]; if(i%3===0)s.style.borderRadius='9999px';
+      s.style.setProperty('--cx',(Math.cos(a)*d)+'px'); s.style.setProperty('--cy',(Math.sin(a)*d)+'px');
+      s.style.setProperty('--cr',((i%2===0?1:-1)*(360+(i%3)*120))+'deg'); w.appendChild(s); }
+    return w;
+  }
+  window.__bookmonQuiz = {
+    show: function(quiz){
+      return new Promise(function(resolve){
+        if(!root || !quiz || !quiz.content){ resolve('correct'); return; } // 퀴즈 없으면 통과
+        var isOX = quiz.type === 'OX', resolved=false, timer=null;
+        root.innerHTML='';
+        var wrap=document.createElement('div'); wrap.className='q-wrap';
+        var card=document.createElement('div'); card.className='q-card';
+        var inner=document.createElement('div'); inner.className='q-inner';
+        if(quiz.title){ var t=document.createElement('div'); t.className='q-title';
+          var tp=document.createElement('p'); tp.textContent=quiz.title; t.appendChild(tp);
+          var rule=document.createElement('div'); rule.className='rule'; t.appendChild(rule); inner.appendChild(t); }
+        var q=document.createElement('div'); q.className='q-question';
+        var qp=document.createElement('p'); var qf=qFont(String(quiz.content).length); qp.style.fontSize=qf[0]; qp.style.lineHeight=qf[1]; fillQuestion(qp, quiz.content); q.appendChild(qp); inner.appendChild(q);
+        function finish(result){
+          if(resolved)return; resolved=true; if(timer)clearInterval(timer);
+          // 정답/오답 표시는 하지 않는다(결과는 도감에서 확인) — 누른 보기가 눌린 모습만 잠깐 보이고 닫힌다.
+          setTimeout(function(){ root.classList.remove('show'); root.innerHTML='';
+            if(result!=='correct'){ var pc=document.getElementById('pose-center'); if(pc) pc.remove(); } // 오답이면 가운데 포즈도 사라짐(책 연출 없음)
+            resolve(result); }, 250);
+        }
+        function pick(idx){ if(resolved)return; finish(idx===Number(quiz.answer)?'correct':'wrong'); }
+        if(isOX){
+          var ox=document.createElement('div'); ox.className='q-ox';
+          ox.appendChild(oxBtn('O','#3780ff',quiz.choice1,function(){pick(1);}));
+          ox.appendChild(oxBtn('X','#ff4b37',quiz.choice2,function(){pick(2);}));
+          inner.appendChild(ox);
+        } else {
+          var list=[quiz.choice1,quiz.choice2,quiz.choice3,quiz.choice4]
+            .map(function(txt,i){return {txt:txt,idx:i+1};}).filter(function(c){return !!c.txt;});
+          var pills=document.createElement('div'); pills.className='q-pills'+(list.length>2?' tworows':'');
+          list.forEach(function(c){ var b=document.createElement('button'); b.type='button'; b.className='q-pill';
+            var sp=document.createElement('span'); sp.textContent=c.txt; b.appendChild(sp);
+            b.addEventListener('click',function(){pick(c.idx);}); pills.appendChild(b); });
+          inner.appendChild(pills);
+        }
+        card.appendChild(inner); wrap.appendChild(card);
+        var g=document.createElement('div'); g.className='q-gauge';
+        var track=document.createElement('div'); track.className='q-track';
+        var fill=document.createElement('div'); fill.className='q-fill'; fill.style.width='100%';
+        var secs=document.createElement('span'); secs.className='q-secs'; secs.textContent=Math.round(DUR/1000)+'초';
+        track.appendChild(fill); track.appendChild(secs); g.appendChild(track); wrap.appendChild(g);
+        root.appendChild(wrap); root.classList.add('show'); try { if (tp) { var cw = card.getBoundingClientRect().width, tw = tp.scrollWidth; if (cw && tw > cw * .62) tp.style.fontSize = (parseFloat(getComputedStyle(tp).fontSize) * cw * .62 / tw).toFixed(2) + 'px' } } catch (e) {} /* 긴 제목(문제명): 그린 뒤 실제 폭이 카드 62%(책갈피 리본과 안 겹치는 폭)를 넘을 때만 글자 축소 */ try { var qs = parseFloat(getComputedStyle(qp).fontSize); while (qp.offsetHeight > q.clientHeight && qs > 9) { qs *= .92; qp.style.fontSize = qs.toFixed(2) + 'px' } } catch (e) {} /* 긴 지문: 1.5배로 키운 글자가 지문 칸을 넘칠 때만 줄인다 */
+        var untimedQ = !!(window.__bookmonUntimed && window.__bookmonUntimed()); if (untimedQ) g.style.visibility = 'hidden' // 체험모드: 시간 게이지 없음
+        var end=Date.now()+DUR;
+        timer=untimedQ?null:setInterval(function(){ var left=end-Date.now();
+          if(left<=0){ fill.style.width='0%'; secs.textContent='0초'; finish('timeout'); }
+          else { var r=Math.max(0,Math.min(1,left/DUR)); fill.style.width=(r*100)+'%'; secs.textContent=Math.ceil(left/1000)+'초'; }
+        },100);
+      });
+    }
+  };
+})();</script><script>;(function () {
+    var QUIZ_PREVIEW = false    // ← 퀴즈 바로보기 (테스트용). true로 켜면 AR 생략하고 퀴즈부터
+    if (!QUIZ_PREVIEW) return
+    try {
+      var h = location.hostname || ''
+      var isDev = h === 'localhost' || h === '127.0.0.1' ||
+        /^192\.168\./.test(h) || /^10\./.test(h) || /^172\.(1[6-9]|2\d|3[01])\./.test(h)
+      if (!isDev) return
+      window.addEventListener('load', function () {
+        setTimeout(function () {
+          // 부팅 흰 화면 제거하고, 호스트/시드 퀴즈(없으면 샘플)를 바로 띄운다.
+          try { if (window.__bookmonReady) window.__bookmonReady() } catch (e) {}
+          var req = null
+          try { req = JSON.parse(sessionStorage.getItem('bookmon-ar-req') || 'null') } catch (e) {}
+          var quiz = (req && req.quiz && req.quiz.content) ? req.quiz : {
+            content: '소가 내뿜는 방귀와 트림이 지구 온난화를 일으키기 때문에 에스토니아에서 소를 키우면 방귀세를 내야한다',
+            type: 'OX', choice1: 'O', choice2: 'X', choice3: null, choice4: null,
+            answer: 1, description: null, title: '녹색지구를 만드는 나의 작은 실천',
+          }
+          if (window.__bookmonQuiz) window.__bookmonQuiz.show(quiz)
+        }, 400)
+      })
+    } catch (e) { /* no-op */ }
+  })()</script><script src="bundle.js"></script></body></html>
