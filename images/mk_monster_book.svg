@@ -1,0 +1,16 @@
+<svg width="126" height="120" viewBox="0 0 126 120" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <!-- 3D 텍스처용 — 3D 입체 닫힌 책(직사각형 표지 + 3D 두께, 사선 -15°). BOOKMON 톤. 그림자 없음. -->
+  <g transform="rotate(-15 63 60)">
+    <g stroke="#124a8d" stroke-width="3.2" stroke-linejoin="round" stroke-linecap="round">
+      <path d="M38 38 L26 31 L26 87 L38 94 Z" fill="#2b568f"/>
+      <path d="M38 38 L90 38 L78 31 L26 31 Z" fill="#fff6da"/>
+      <path d="M38 38 L90 38 L90 94 L38 94 Z" fill="#366ab3"/>
+    </g>
+    <g stroke="#d8c48a" stroke-width="1.4" opacity="0.8">
+      <path d="M32 35 L82 35"/>
+      <path d="M35 33 L86 33"/>
+    </g>
+    <ellipse cx="32" cy="64" rx="3" ry="9" fill="#1e3f6b" opacity="0.7"/>
+    <path d="M52 36 L62 36 L62 64 L57 58 L52 64 Z" fill="#eb3c84" stroke="#c31f63" stroke-width="1.6" stroke-linejoin="round"/>
+  </g>
+</svg>

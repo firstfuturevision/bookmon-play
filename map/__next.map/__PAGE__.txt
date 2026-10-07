@@ -1,0 +1,6 @@
+1:"$Sreact.fragment"
+2:I[39262,["/bookmon-play/_next/static/chunks/3141t7fm0i45j.js","/bookmon-play/_next/static/chunks/14mrh2-p_w84d.js","/bookmon-play/_next/static/chunks/17ntx4fap6cll.js","/bookmon-play/_next/static/chunks/0uaq2w23zpm3_.js"],"MapScreen"]
+3:I[97367,["/bookmon-play/_next/static/chunks/3141t7fm0i45j.js","/bookmon-play/_next/static/chunks/14mrh2-p_w84d.js"],"OutletBoundary"]
+4:"$Sreact.suspense"
+0:{"rsc":["$","$1","c",{"children":[["$","$L2",null,{}],[["$","script","script-0",{"src":"/bookmon-play/_next/static/chunks/17ntx4fap6cll.js","async":true}],["$","script","script-1",{"src":"/bookmon-play/_next/static/chunks/0uaq2w23zpm3_.js","async":true}]],["$","$L3",null,{"children":["$","$4",null,{"name":"Next.MetadataOutlet","children":"$@5"}]}]]}],"isPartial":false,"staleTime":300,"varyParams":null,"buildId":"xCrCCbeyYpXqWGAOzXdwd"}
+5:null
