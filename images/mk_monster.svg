@@ -1,0 +1,28 @@
+<svg width="126" height="128" viewBox="0 0 126 128" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <!-- 몬스터 마커: 3D 입체 닫힌 책. 앞표지는 직사각형(전단 없음), 3D 두께(윗면·책등)만 부여 후 사선(-15°) 회전. -->
+  <!-- 바닥 그림자(수평 유지) -->
+  <ellipse cx="63" cy="116" rx="34" ry="7" fill="#12213a" opacity="0.16"/>
+
+  <g transform="rotate(-15 63 68)">
+    <g stroke="#124a8d" stroke-width="3.2" stroke-linejoin="round" stroke-linecap="round">
+      <!-- 왼쪽 책등(측면 두께) — 앞표지 좌변을 뒤로(-12,-7) 밀어 만든 면 -->
+      <path d="M38 44 L26 37 L26 93 L38 100 Z" fill="#2b568f"/>
+      <!-- 윗면(페이지 단면) — 앞표지 상변을 뒤로 민 밴드 -->
+      <path d="M38 44 L90 44 L78 37 L26 37 Z" fill="#fff6da"/>
+      <!-- 앞표지 — 직사각형(38,44)~(90,100) -->
+      <path d="M38 44 L90 44 L90 100 L38 100 Z" fill="#366ab3"/>
+    </g>
+
+    <!-- 페이지 결(윗면) -->
+    <g stroke="#d8c48a" stroke-width="1.4" opacity="0.8">
+      <path d="M32 41 L82 41"/>
+      <path d="M35 39 L86 39"/>
+    </g>
+
+    <!-- 책등 오목 장식(측면 타원) -->
+    <ellipse cx="32" cy="70" rx="3" ry="9" fill="#1e3f6b" opacity="0.7"/>
+
+    <!-- 핑크 리본 북마크(직사각형 표지 위, 세로) — 살짝 왼쪽 -->
+    <path d="M52 42 L62 42 L62 70 L57 64 L52 70 Z" fill="#eb3c84" stroke="#c31f63" stroke-width="1.6" stroke-linejoin="round"/>
+  </g>
+</svg>
